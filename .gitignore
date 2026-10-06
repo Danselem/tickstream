@@ -218,3 +218,21 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# tickstream project
+.python-version
+infra/backend.hcl
+infra/plan.tfplan
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+override.tf
+*_override.tf
+dbt/target/
+dbt/logs/
+dbt/dbt_packages/
+quality/reports/
+*.log
+superset/metadata.db
