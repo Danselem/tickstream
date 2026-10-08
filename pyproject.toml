@@ -52,9 +52,3 @@ disallow_incomplete_defs = true
 warn_return_any = true
 warn_unused_ignores = true
 show_error_codes = true
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-markers = [
-  "integration: needs Kafka/AWS (skipped by default; run with -m integration)",
-]

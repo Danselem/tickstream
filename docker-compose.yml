@@ -1,0 +1,61 @@
+# Local runtime: Kafka (KRaft, single broker) + producer + consumer.
+# Everything except Kafka runs the same image with a different command.
+# AWS credentials reach containers via env_file (.env, gitignored).
+
+services:
+  kafka:
+    image: apache/kafka:4.2.0
+    container_name: tickstream-kafka
+    ports:
+      - "9092:9092" # EXTERNAL listener for host processes (uv run, tests)
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: INTERNAL://:19092,EXTERNAL://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:19092,EXTERNAL://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_NUM_PARTITIONS: 3
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list"]
+      interval: 10s
+      timeout: 10s
+      retries: 6
+
+  producer:
+    build: .
+    container_name: tickstream-producer
+    command: ["python", "-m", "pipeline.producer"]
+    env_file: [".env"]
+    environment:
+      TICKSTREAM_KAFKA_BOOTSTRAP: kafka:19092
+      AWS_REGION: ${TICKSTREAM_AWS_REGION:-us-east-1}
+    depends_on:
+      kafka:
+        condition: service_healthy
+    restart: unless-stopped
+
+  consumer:
+    build: .
+    container_name: tickstream-consumer
+    command: ["python", "-m", "pipeline.consumer"]
+    env_file: [".env"]
+    environment:
+      TICKSTREAM_KAFKA_BOOTSTRAP: kafka:19092
+      AWS_REGION: ${TICKSTREAM_AWS_REGION:-us-east-1}
+    depends_on:
+      kafka:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  kafka-data:

@@ -39,10 +39,26 @@ Short records of each non-obvious choice: context, decision, consequence.
   RF=3, `min.insync.replicas=2`, idempotent + transactional producer.
 
 ## ADR-005 — Real AWS only; offline covered by pytest, not by compose
-
 - Context: Brief says everything except S3/Glue/Athena runs locally, i.e. compose
   always talks to real AWS. An offline MinIO profile would add services and diverge.
 - Decision: no MinIO/SQLite compose profile. Consumer catalog is config-driven
   (`CATALOG_TYPE=glue|sql`), so integration tests run fully offline against a SQL
   catalog + temp warehouse.
 - Consequence: developing ingestion needs AWS credentials; tests don't.
+
+## ADR-006 — Kafka topic: 3 partitions, symbol keys, 7-day retention
+
+- Context: one symbol today, 6–7 tomorrow; single consumer; replays must be possible.
+- Decision: `trades.raw` with 3 partitions (never shrinkable later), key = symbol
+  (all XRP lands in one partition today; coins spread later), 7-day retention for
+  replay headroom, producer-created at startup. Dual listeners: `kafka:19092`
+  in-compose, `localhost:9092` on host.
+- Consequence: verified 0 duplicates across restart + SIGKILL; lag metric initially
+  over-reported on empty partitions (fixed in `metrics.py` + regression test).
+
+## ADR-007 — One micro-batch commit = one Iceberg snapshot/file (for now)
+
+- Context: 45 s batches currently yield ~1 small file per commit (14 files after
+  ~10 min). Fine at this scale; becomes the small-files problem at 7 coins.
+- Decision: accept for Phase 1; Phase 2 adds scheduled Athena `OPTIMIZE` + `VACUUM`.
+- Consequence: nothing to do now except not letting it surprise us later.

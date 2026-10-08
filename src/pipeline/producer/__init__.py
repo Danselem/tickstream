@@ -1,0 +1,1 @@
+"""Binance WebSocket → Kafka producer."""
