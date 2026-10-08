@@ -1,4 +1,4 @@
-# Local runtime: Kafka (KRaft, single broker) + producer + consumer.
+# Local runtime: Kafka (KRaft, single broker) + producer + consumer + scheduler.
 # Everything except Kafka runs the same image with a different command.
 # AWS credentials reach containers via env_file (.env, gitignored).
 
@@ -55,6 +55,16 @@ services:
     depends_on:
       kafka:
         condition: service_healthy
+    restart: unless-stopped
+
+  scheduler:
+    build: .
+    container_name: tickstream-scheduler
+    command: ["python", "-m", "pipeline.scheduler"]
+    env_file: [".env"]
+    environment:
+      AWS_REGION: ${TICKSTREAM_AWS_REGION:-us-east-1}
+    # No kafka dependency: GX reads bronze from S3/Glue, dbt runs on Athena.
     restart: unless-stopped
 
 volumes:

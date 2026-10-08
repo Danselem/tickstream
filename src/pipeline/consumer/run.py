@@ -10,6 +10,7 @@ from pipeline.consumer.batcher import TradeBatcher
 from pipeline.consumer.bronze_writer import BronzeWriter
 from pipeline.consumer.kafka_consumer import build_consumer
 from pipeline.consumer.metrics import consumer_lag
+from pipeline.consumer.ops_writer import OpsWriter
 
 logger = get_logger("consumer")
 
@@ -19,6 +20,7 @@ def main() -> None:
     settings = get_settings()
     configure_logging(settings.log_level)
     writer = BronzeWriter(settings)
+    ops = OpsWriter(settings)
     consumer = build_consumer(settings)
     consumer.subscribe([settings.topic])
     batcher = TradeBatcher(settings.batch_max_rows, float(settings.batch_interval_s))
@@ -48,6 +50,9 @@ def main() -> None:
             lag_messages=consumer_lag(consumer),
             commit_ms=elapsed_ms,
         )
+        # Metrics go after the commit: real lag/commit_ms values. A crash in this
+        # window loses one metrics row (gap, never a dup); bronze is unaffected.
+        ops.append_metrics(report)
         logger.info("batch_committed", **report.model_dump(mode="json"))
 
     while running:

@@ -16,7 +16,7 @@ dependencies = [
   "pyathena<=3.35",
   "pydantic>=2.10",
   "pydantic-settings>=2.5",
-  "pyiceberg[glue,s3fs,pandas]>=0.9",
+  "pyiceberg[glue,s3fs,pandas,sql-sqlite,pyiceberg-core]>=0.9",
   "structlog>=25.1",
   "websockets>=15",
 ]
@@ -24,6 +24,7 @@ dependencies = [
 [dependency-groups]
 dev = [
   "mypy>=1.13",
+  "pandas-stubs>=3.0.5.260914",
   "pytest>=8",
   "pytest-asyncio>=0.24",
   "ruff>=0.8",
@@ -52,3 +53,13 @@ disallow_incomplete_defs = true
 warn_return_any = true
 warn_unused_ignores = true
 show_error_codes = true
+
+[[tool.mypy.overrides]]
+module = ["pyarrow.*", "confluent_kafka.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+  "integration: needs Kafka/AWS (skipped by default; run with -m integration)",
+]

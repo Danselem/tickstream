@@ -1,0 +1,142 @@
+{
+  "name": "bronze_trades",
+  "id": "9ab71d3d-172e-4bfd-b57a-af81bb6a0530",
+  "expectations": [
+    {
+      "type": "expect_table_columns_to_match_set",
+      "kwargs": {
+        "column_set": [
+          "symbol",
+          "trade_id",
+          "price",
+          "quantity",
+          "event_time",
+          "ingest_time",
+          "is_buyer_maker"
+        ],
+        "exact_match": false
+      },
+      "meta": {},
+      "id": "8f9d1669-495b-47d3-86e6-f7df57792682",
+      "severity": "critical"
+    },
+    {
+      "type": "expect_column_values_to_not_be_null",
+      "kwargs": {
+        "column": "symbol"
+      },
+      "meta": {},
+      "id": "eed9c767-1ce6-44fd-a3fa-c4e3679c10a6",
+      "severity": "critical"
+    },
+    {
+      "type": "expect_column_values_to_not_be_null",
+      "kwargs": {
+        "column": "trade_id"
+      },
+      "meta": {},
+      "id": "030c880c-d5e3-4986-8b29-dac78c50ae9a",
+      "severity": "critical"
+    },
+    {
+      "type": "expect_column_values_to_not_be_null",
+      "kwargs": {
+        "column": "price"
+      },
+      "meta": {},
+      "id": "bd3a2003-963d-46bd-bf33-4c2c5e9e2594",
+      "severity": "critical"
+    },
+    {
+      "type": "expect_column_values_to_not_be_null",
+      "kwargs": {
+        "column": "quantity"
+      },
+      "meta": {},
+      "id": "43c793da-b372-4822-aca4-1154f7b51977",
+      "severity": "critical"
+    },
+    {
+      "type": "expect_column_values_to_not_be_null",
+      "kwargs": {
+        "column": "event_time"
+      },
+      "meta": {},
+      "id": "9d6b1e8e-9611-4597-9931-1a61a4cdcae0",
+      "severity": "critical"
+    },
+    {
+      "type": "expect_column_values_to_not_be_null",
+      "kwargs": {
+        "column": "ingest_time"
+      },
+      "meta": {},
+      "id": "2c33cdf4-a183-4362-95e3-b95f37dcc992",
+      "severity": "critical"
+    },
+    {
+      "type": "expect_column_values_to_not_be_null",
+      "kwargs": {
+        "column": "is_buyer_maker"
+      },
+      "meta": {},
+      "id": "317b1de7-a29f-4639-a2cf-35e31cb41d20",
+      "severity": "critical"
+    },
+    {
+      "type": "expect_column_values_to_be_unique",
+      "kwargs": {
+        "column": "unique_key"
+      },
+      "meta": {},
+      "id": "78d664c5-292c-4eb2-aa5b-d4dcd707c9f3",
+      "severity": "critical"
+    },
+    {
+      "type": "expect_column_values_to_be_between",
+      "kwargs": {
+        "column": "price",
+        "min_value": 0.0,
+        "strict_min": true
+      },
+      "meta": {},
+      "id": "6676dda7-8986-481d-8c5b-c0d59f6e00a3",
+      "severity": "critical"
+    },
+    {
+      "type": "expect_column_values_to_be_between",
+      "kwargs": {
+        "column": "quantity",
+        "min_value": 0.0,
+        "strict_min": true
+      },
+      "meta": {},
+      "id": "dda48ad4-9b13-4779-8234-314e94d5fee4",
+      "severity": "critical"
+    },
+    {
+      "type": "expect_column_max_to_be_between",
+      "kwargs": {
+        "column": "event_time",
+        "min_value": "2026-10-06T14:19:28.841139",
+        "max_value": "2026-10-06T14:25:28.841139"
+      },
+      "meta": {},
+      "id": "053bf547-09f7-425d-8542-e429dad86899",
+      "severity": "critical"
+    },
+    {
+      "type": "expect_table_row_count_to_be_between",
+      "kwargs": {
+        "min_value": 1
+      },
+      "meta": {},
+      "id": "07b7cd6c-25b3-4b4e-84c4-5a8e9daa3f94",
+      "severity": "critical"
+    }
+  ],
+  "meta": {
+    "great_expectations_version": "1.23.2"
+  },
+  "notes": null
+}

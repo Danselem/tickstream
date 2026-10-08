@@ -60,3 +60,17 @@ class BatchReport(BaseModel):
     max_event_time: datetime | None = None
     lag_messages: int = Field(ge=0)
     commit_ms: float = Field(ge=0)
+
+
+class QualityResult(BaseModel):
+    """Outcome of one GX validation run: logs, JSON report, and the ops table."""
+
+    model_config = ConfigDict(frozen=True)
+
+    check_at: datetime
+    success: bool
+    window_start: datetime
+    window_end: datetime
+    rows_scanned: int = Field(default=0, ge=0)
+    failed_expectations: tuple[str, ...] = ()
+    run_ms: float = Field(default=0.0, ge=0)
