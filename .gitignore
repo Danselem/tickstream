@@ -236,3 +236,4 @@ dbt/dbt_packages/
 quality/reports/
 *.log
 superset/metadata.db
+dbt/.user.yml

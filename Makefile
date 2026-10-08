@@ -10,7 +10,7 @@ BACKEND_CONFIG := $(INFRA_DIR)/backend.hcl
 
 ALERT_EMAIL ?= budget-alerts@example.com
 
-.PHONY: help install up down logs restart lint format typecheck test quality dbt-build infra-bootstrap infra-plan infra-apply
+.PHONY: help install up down logs restart lint format typecheck test quality dbt-build maintenance infra-bootstrap infra-plan infra-apply
 
 help: ## Show targets
 	@grep -E '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS=":.*?## "} {printf "  %-16s %s\n", $$1, $$2}'
@@ -45,8 +45,15 @@ test: ## Pytest unit suite (integration tests auto-skip without env)
 quality: ## Run Great Expectations checks once (Phase 2+)
 	$(UV) python -m pipeline.scheduler --once --quality-only
 
-dbt-build: ## Run dbt build (Phase 2+; scheduler runs this only after GE passes)
-	$(UV) dbt build --project-dir dbt --profiles-dir dbt
+# dbt reads connection details from env (profiles.yml uses env_var), so .env is
+# sourced first. `dbt deps` installs dbt_utils on first run (dbt_packages/ is gitignored).
+dbt-build: ## Run dbt deps + build (Phase 2+; scheduler runs this only after GE passes)
+	bash -c 'set -a; [ -f .env ] && source .env; set +a; $(UV) dbt deps --project-dir dbt --profiles-dir dbt && $(UV) dbt build --project-dir dbt --profiles-dir dbt'
+
+# --quality-only skips dbt (this target only compacts); --maintenance runs after
+# a passing quality check. The scheduler loop itself calls run_once() with dbt.
+maintenance: ## Run Athena OPTIMIZE + VACUUM on bronze/silver/gold (Phase 2+)
+	$(UV) python -m pipeline.scheduler --once --quality-only --maintenance
 
 infra-bootstrap: ## One-time: create S3+DynamoDB tofu state backend, write infra/backend.hcl
 	cd $(BOOTSTRAP_DIR) && $(TOFU) init && $(TOFU) apply -auto-approve

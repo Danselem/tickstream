@@ -35,7 +35,8 @@ data "aws_iam_policy_document" "pipeline" {
   }
 
   # Glue catalog: read the DB, manage our tables/partitions (dbt full refreshes
-  # drop and recreate tables; PyIceberg commits touch table metadata).
+  # drop and recreate tables; PyIceberg commits touch table metadata; the
+  # dbt-athena adapter checks table versions when materializing relations).
   statement {
     sid = "GlueCatalog"
     actions = [
@@ -43,6 +44,7 @@ data "aws_iam_policy_document" "pipeline" {
       "glue:GetDatabases",
       "glue:GetTable",
       "glue:GetTables",
+      "glue:GetTableVersions",
       "glue:GetPartition",
       "glue:GetPartitions",
       "glue:BatchGetPartition",

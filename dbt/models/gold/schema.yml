@@ -1,0 +1,61 @@
+version: 2
+
+models:
+  - name: gold_candles_1m
+    description: "1-minute OHLC candles with volume, VWAP, trade count and volatility (stddev of per-trade log returns). Incremental MERGE on (symbol, candle_start) with a 30-minute trailing recompute window."
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns:
+            - symbol
+            - candle_start
+      - dbt_utils.expression_is_true:
+          expression: "high >= low"
+    columns:
+      - name: symbol
+        description: "Trading pair."
+        tests:
+          - not_null
+      - name: candle_start
+        description: "Minute bucket start, UTC."
+        tests:
+          - not_null
+      - name: open
+        description: "First trade price of the minute."
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: "> 0"
+      - name: high
+        description: "Highest trade price of the minute."
+        tests:
+          - not_null
+      - name: low
+        description: "Lowest trade price of the minute."
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: "> 0"
+      - name: close
+        description: "Last trade price of the minute."
+        tests:
+          - not_null
+      - name: volume
+        description: "Summed base-asset quantity."
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: "> 0"
+      - name: vwap
+        description: "Volume-weighted average price (sum(price*qty)/sum(qty))."
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: "> 0"
+      - name: trade_count
+        description: "Number of trades in the minute."
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: ">= 1"
+      - name: volatility
+        description: "Sample stddev of per-trade log returns within the minute. NULL for single-trade candles."

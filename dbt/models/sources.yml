@@ -1,0 +1,29 @@
+version: 2
+
+sources:
+  - name: lake
+    description: "Raw Iceberg tables written by the Kafka consumer (PyIceberg/Glue)."
+    database: awsdatacatalog
+    schema: tickstream
+    tables:
+      - name: bronze_trades
+        description: "Raw trade facts, upserted on (symbol, trade_id). Never modified."
+        loaded_at_field: ingest_time
+        freshness:
+          warn_after: { count: 10, period: minute }
+          error_after: { count: 30, period: minute }
+        columns:
+          - name: symbol
+            description: "Trading pair, e.g. XRPUSDT. The Kafka message key."
+          - name: trade_id
+            description: "Binance trade id (unique per symbol)."
+          - name: price
+            description: "Execution price (decimal)."
+          - name: quantity
+            description: "Base-asset quantity (decimal)."
+          - name: event_time
+            description: "Exchange match time, UTC (Binance `T`)."
+          - name: ingest_time
+            description: "Producer arrival time, UTC."
+          - name: is_buyer_maker
+            description: "True when the buyer was the maker (Binance `m`)."

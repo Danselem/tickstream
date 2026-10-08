@@ -1,0 +1,22 @@
+name: "tickstream"
+version: "1.0.0"
+config-version: 2
+profile: "tickstream"
+
+model-paths: ["models"]
+target-path: "target"
+clean-targets: ["target", "dbt_packages", "logs"]
+
+# Folder-level materialization; per-model keys/partitions live in each .sql file.
+models:
+  tickstream:
+    staging:
+      +materialized: view
+    silver:
+      +materialized: incremental
+      +table_type: iceberg
+      +incremental_strategy: merge
+    gold:
+      +materialized: incremental
+      +table_type: iceberg
+      +incremental_strategy: merge

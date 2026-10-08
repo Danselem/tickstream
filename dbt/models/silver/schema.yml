@@ -1,0 +1,46 @@
+version: 2
+
+models:
+  - name: silver_trades
+    description: "Deduped trades (one row per symbol + trade_id). Incremental MERGE with a 2-hour late-arrival lookback."
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns:
+            - symbol
+            - trade_id
+    columns:
+      - name: symbol
+        description: "Trading pair."
+        tests:
+          - not_null
+          - accepted_values:
+              values: ["XRPUSDT"]
+              quote: true
+      - name: trade_id
+        description: "Binance trade id (unique per symbol)."
+        tests:
+          - not_null
+      - name: price
+        description: "Execution price, must be positive."
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: "> 0"
+      - name: quantity
+        description: "Base-asset quantity, must be positive."
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: "> 0"
+      - name: event_time
+        description: "Exchange match time, UTC."
+        tests:
+          - not_null
+      - name: ingest_time
+        description: "Producer arrival time, UTC."
+        tests:
+          - not_null
+      - name: is_buyer_maker
+        description: "True when the buyer was the maker."
+        tests:
+          - not_null

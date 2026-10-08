@@ -1,6 +1,12 @@
 # Build Plan — `tickstream` (Binance → Kafka → Iceberg → dbt → Superset)
 
-Status: **for review**. Nothing is built yet. Phase 0 starts only after this plan is approved.
+Status: **Phase 0–2 built and verified** (Oct 2026). Phase 0: skeleton + infra applied.
+Phase 1: XRP ingestion live (bronze via upsert, restart/SIGKILL replay-safe).
+Phase 2: dbt silver/gold green (33/33), GX gate blocks dbt on failure,
+scheduler loop + OPTIMIZE/VACUUM live. Deviations from this plan are recorded
+in docs/decisions.md (ADR-008 ops tables in `tickstream` DB, ADR-009 MERGE
+`update_condition`, ADR-010 `glue:GetTableVersions`). Phase 3 (Superset +
+multi-coin) not started.
 
 Locked user decisions: (1) bronze idempotency = upsert/MERGE on `(symbol, trade_id)`;
 (2) Great Expectations validates a local PyIceberg scan, not Athena; (3) OpenTofu state in

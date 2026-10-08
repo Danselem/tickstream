@@ -62,3 +62,39 @@ Short records of each non-obvious choice: context, decision, consequence.
   ~10 min). Fine at this scale; becomes the small-files problem at 7 coins.
 - Decision: accept for Phase 1; Phase 2 adds scheduled Athena `OPTIMIZE` + `VACUUM`.
 - Consequence: nothing to do now except not letting it surprise us later.
+
+## ADR-008 — Ops tables live in the `tickstream` Glue database
+
+- Context: plan.md named them `ops.quality_results` / `ops.pipeline_metrics`, but
+  infra provisions a single Glue database (`tickstream`, whose description already
+  says "and ops tables"), and the pipeline IAM user lacks `glue:CreateDatabase`.
+- Decision: `tickstream.quality_results` + `tickstream.pipeline_metrics`,
+  unpartitioned append-only Iceberg tables created idempotently by
+  `ensure_ops_tables()` (no infra change, no apply needed).
+- Consequence: replaying a consumer batch can duplicate a metrics row (gap-free
+  alternative chosen: metrics append happens *after* the offset commit, so a crash
+  loses one row instead — bronze correctness unaffected either way).
+
+## ADR-009 — dbt MERGEs carry an `update_condition` (immutable-event pattern)
+
+- Context: trade facts never change, but the silver 2 h late-arrival lookback
+  re-matches ~60k rows per run. Unconditional `WHEN MATCHED THEN UPDATE` rewrote
+  them all → Glue `UpdateTable` timed out (`OperationTimeoutException`) twice.
+- Decision: `update_condition` with null-safe `IS DISTINCT FROM` over all non-key
+  columns on silver and gold (gold needs it for nullable `volatility`). Matched
+  but identical rows are skipped; genuinely changed rows (e.g. late-arrival
+  `ingest_time`, corrected candles) still update. GX uniqueness uses a derived
+  `symbol:trade_id` column since trade_id is only unique per symbol.
+- Consequence: incremental MERGEs commit in seconds; semantics unchanged
+  (verified: second build merges new keys only, 0 dupes).
+
+## ADR-010 — One IAM addition for dbt: `glue:GetTableVersions`
+
+- Context: first `dbt build` failed — the dbt-athena adapter calls
+  `GetTableVersions` when materializing relations, and the least-privilege
+  allow-list didn't include it.
+- Decision: added the single read-only action to `infra/iam.tf` (planned, reviewed,
+  applied with approval; budget alert email preserved by re-planning with the real
+  address — the default placeholder would have wiped it).
+- Consequence: dbt builds green (33/33). Reminder: always re-plan infra with
+  `ALERT_EMAIL=<real>` or the placeholder default silently replaces notifications.
