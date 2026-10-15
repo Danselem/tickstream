@@ -75,4 +75,17 @@ data "aws_iam_policy_document" "pipeline" {
     ]
     resources = [aws_athena_workgroup.pipeline.arn]
   }
+
+  # Athena metadata reads: GetTableMetadata/ListDatabases authorize against the
+  # data catalog, NOT the workgroup (verified against the AWS action reference).
+  # PyAthena 3.38+ reflects columns via GetTableMetadata; Superset lists
+  # schemas via ListDatabases. Read-only, scoped to AwsDataCatalog.
+  statement {
+    sid = "AthenaMetadata"
+    actions = [
+      "athena:GetTableMetadata",
+      "athena:ListDatabases",
+    ]
+    resources = ["arn:aws:athena:${var.aws_region}:${data.aws_caller_identity.current.account_id}:datacatalog/AwsDataCatalog"]
+  }
 }

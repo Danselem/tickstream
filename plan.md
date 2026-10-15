@@ -5,8 +5,9 @@ Phase 1: XRP ingestion live (bronze via upsert, restart/SIGKILL replay-safe).
 Phase 2: dbt silver/gold green (33/33), GX gate blocks dbt on failure,
 scheduler loop + OPTIMIZE/VACUUM live. Deviations from this plan are recorded
 in docs/decisions.md (ADR-008 ops tables in `tickstream` DB, ADR-009 MERGE
-`update_condition`, ADR-010 `glue:GetTableVersions`). Phase 3 (Superset +
-multi-coin) not started.
+`update_condition`, ADR-010 `glue:GetTableVersions`). Phase 3a (Superset
+dashboard on XRP) built and verified: 5 charts + published dashboard, SQL Lab
+returns live Athena rows (ADR-011/012). Phase 3b (7-coin expansion) not started.
 
 Locked user decisions: (1) bronze idempotency = upsert/MERGE on `(symbol, trade_id)`;
 (2) Great Expectations validates a local PyIceberg scan, not Athena; (3) OpenTofu state in

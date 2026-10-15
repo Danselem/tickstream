@@ -67,5 +67,23 @@ services:
     # No kafka dependency: GX reads bronze from S3/Glue, dbt runs on Athena.
     restart: unless-stopped
 
+  superset:
+    build:
+      context: .
+      dockerfile: superset/Dockerfile
+    container_name: tickstream-superset
+    ports:
+      - "8088:8088"
+    env_file: [".env"]
+    environment:
+      AWS_REGION: ${TICKSTREAM_AWS_REGION:-us-east-1}
+      SUPERSET_URL: http://localhost:8088
+      SUPERSET_HOME: /app/superset_home
+    volumes:
+      - superset-home:/app/superset_home
+    # Standalone: metadata DB bootstraps itself; dashboard provisioning runs at boot.
+    restart: unless-stopped
+
 volumes:
   kafka-data:
+  superset-home:

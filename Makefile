@@ -1,6 +1,7 @@
 # tickstream — the Makefile is the only entry point (see AGENTS.md).
 # Phase map: install/lint/format/typecheck/test + infra-* land in Phase 0.
 # up/down/logs/restart land in Phase 1. quality/dbt-build land in Phase 2.
+# superset lands in Phase 3.
 
 UV := uv run
 TOFU := tofu
@@ -10,7 +11,7 @@ BACKEND_CONFIG := $(INFRA_DIR)/backend.hcl
 
 ALERT_EMAIL ?= budget-alerts@example.com
 
-.PHONY: help install up down logs restart lint format typecheck test quality dbt-build maintenance infra-bootstrap infra-plan infra-apply
+.PHONY: help install up down logs restart lint format typecheck test quality dbt-build maintenance superset infra-bootstrap infra-plan infra-apply
 
 help: ## Show targets
 	@grep -E '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS=":.*?## "} {printf "  %-16s %s\n", $$1, $$2}'
@@ -54,6 +55,9 @@ dbt-build: ## Run dbt deps + build (Phase 2+; scheduler runs this only after GE 
 # a passing quality check. The scheduler loop itself calls run_once() with dbt.
 maintenance: ## Run Athena OPTIMIZE + VACUUM on bronze/silver/gold (Phase 2+)
 	$(UV) python -m pipeline.scheduler --once --quality-only --maintenance
+
+superset: ## Re-run dashboard provisioning against the running Superset (Phase 3+)
+	docker compose exec superset python /app/provision/provision.py
 
 infra-bootstrap: ## One-time: create S3+DynamoDB tofu state backend, write infra/backend.hcl
 	cd $(BOOTSTRAP_DIR) && $(TOFU) init && $(TOFU) apply -auto-approve

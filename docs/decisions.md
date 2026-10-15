@@ -98,3 +98,42 @@ Short records of each non-obvious choice: context, decision, consequence.
   address — the default placeholder would have wiped it).
 - Consequence: dbt builds green (33/33). Reminder: always re-plan infra with
   `ALERT_EMAIL=<real>` or the placeholder default silently replaces notifications.
+
+## ADR-011 — Superset dashboard as code via a REST provision script
+
+- Context: plan.md proposed committing an exported dashboard ZIP, but there is no
+  browser in this loop to click one together, and hand-writing the export format
+  (UUIDs, layout nodes) is fiddlier than the v1 REST API, which is stable and
+  introspectable. `src/pipeline/superset/provision.py` (stdlib + urllib only,
+  unit-tested with a fake transport) creates/updates the Athena database,
+  datasets, 5 charts and the dashboard — idempotent, runs at container boot and
+  via `make superset`.
+- Decision: REST provisioning, not export-ZIP. Datasets point at gold + ops
+  tables only, never bronze.
+- Consequence: `make up` converges to a published dashboard with zero manual
+  steps (Brief §11). Verified via SQL Lab through Superset: live row counts.
+
+## ADR-012 — Superset-on-Athena gotchas (config, drivers, IAM, catalog case)
+
+- Context: four independent failures, each with a misleading surface symptom:
+  1. `SUPERSET_CONFIG` is a Python *module name*, not a file path, and the custom
+     module *replaces* `superset.config` — so it must start with
+     `from superset.config import *` (else `KeyError: 'DATA_DIR'`).
+  2. The image runs from `/app/.venv` (pip-less, uv-built); system `pip`
+     installs to a path outside `sys.path`. Driver install needs
+     `python -m ensurepip` + venv `pip` (else "Connection failed" on every DB).
+  3. Mutating API calls need BOTH the session cookie (cookie jar) and the
+     `X-CSRFToken` header, even with a JWT bearer token.
+  4. Athena metadata actions authorize against the **data catalog**, not the
+     workgroup — `GetTableMetadata`/`ListDatabases` needed their own
+     `datacatalog/AwsDataCatalog`-scoped statement (a workgroup-scoped grant is
+     silently useless).
+  5. PyAthena defaults `catalog_name` to lowercase `awsdatacatalog`, and Athena
+     matches `datacatalog/<name>` case-sensitively — so reflection was denied
+     despite a correct policy. The URI now pins `catalog_name=AwsDataCatalog`.
+     (Diagnosed by calling the API with boto3 as the same principal: allowed —
+     proving policy/principal fine and the difference was request params.)
+- Decision: all five recorded here so the next database/driver/image doesn't
+  re-pay the tuition. Prefer evidence over guessing: reproduce with the same
+  principal, check CloudTrail, read the driver source in the image.
+- Consequence: dataset sync + SQL Lab verified working; dashboard shows live data.
