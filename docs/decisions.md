@@ -333,5 +333,49 @@ Short records of each non-obvious choice: context, decision, consequence.
   rebuilt dashboard is always readable. Trade-off: labels live in a map that
   must be extended when new columns are surfaced.
 
+## ADR-019 — Dimension views (`dim_symbol`, `dim_time`)
+
+- Context: the gold layer is fact-shaped (`gold_candles_1m`, summaries) with no
+  dimensions. A BI layer benefits from a symbol dimension (base/quote) and a time
+  spine with calendar attributes (for later hour/weekday heatmaps), but renaming
+  the existing facts to `fct_*` would churn every model, test and doc for little
+  payoff.
+- Decision: add two **views** and keep the existing fact names (assessment of the
+  external "model it dimensionally" advice).
+  - `dim_symbol`: one row per pair (base/quote parsed, first/last seen) —
+    `group by symbol` over silver.
+  - `dim_time`: a bounded minute spine from the candles' time range via Trino
+    `sequence` + `unnest`, with hour/day/weekday/hour_of_day.
+- Consequence: a clean, cheap dimension layer without a rename. Both are views,
+  so `dim_time` is regenerated per query (bounded by the observed range) and has
+  no storage cost; it is not yet wired to a chart (it serves the future risk
+  dashboard). Trade-off: a view re-computes the spine each query rather than
+  materialising it.
+
+## ADR-020 — Market overview + native dashboard filters
+
+- Context: the Market tab showed only time-series, no at-a-glance summary, and
+  without filters every chart plotted all 7 coins at once. Viewers needed a
+  candlestick price view, proportional volume, headline figures and the ability
+  to focus a symbol.
+- Decision: extend the Market tab and add dashboard-level native filters.
+  - New charts: native **candlestick** (`viz_type=candlestick`; metric keys
+    `open`/`close`/`high`/`low`, dimension key `series`, verified against the
+    Superset 6 control panel), **treemap_v2** of notional share, and two
+    **big_number_total** KPI tiles (notional, trades). Superset 6 keys are
+    version-specific: `treemap_v2`/`heatmap_v2`/`histogram_v2`, `big_number`,
+    `big_number_total`, `candlestick` (not the old deck.gl `treemap`).
+  - Native filters live in `dashboard.json_metadata.native_filter_configuration`:
+    a **Symbol** `filter_select` (targets the gold dataset by **uuid**, scoped to
+    the gold candles on the Market tab) and a global **Time range** `filter_time`.
+    `ensure_dashboard` sends `positions` and the filters in **one** `json_metadata`
+    (the PUT replaces it wholesale).
+- Consequence: the overview answers "what is happening now" at a glance and can
+  be focused per coin, while summary tables keep all coins. Trade-off: candlestick
+  correctness assumes the 1-minute grain (one row per candle, so `MAX(open)` is
+  the open); changing the chart's time grain would need first/last aggregation.
+  `uuid` is required for filter targets, so provisioning fails loudly if the
+  dataset has none.
+
 
 

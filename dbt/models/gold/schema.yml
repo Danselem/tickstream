@@ -179,3 +179,37 @@ models:
           - not_null
       - name: change_pct
         description: "Hour % change: (close - open) / open."
+
+  - name: dim_symbol
+    description: "Symbol dimension: one row per trading pair seen in silver, with base/quote assets and first/last seen timestamps. A view (ADR-019)."
+    columns:
+      - name: symbol
+        description: "Trading pair."
+        tests:
+          - not_null
+          - unique
+      - name: base_asset
+        description: "Base asset, e.g. XRP in XRPUSDT."
+      - name: quote_asset
+        description: "Quote asset, e.g. USDT in XRPUSDT."
+      - name: first_seen
+        description: "Earliest event time observed, UTC."
+      - name: last_seen
+        description: "Latest event time observed, UTC."
+
+  - name: dim_time
+    description: "Time dimension: bounded minute spine over the candles' time range, with hour/day/weekday attributes for heatmaps. A view (ADR-019)."
+    columns:
+      - name: minute_start
+        description: "Minute bucket start, UTC."
+        tests:
+          - not_null
+          - unique
+      - name: hour_start
+        description: "Containing hour start, UTC."
+      - name: day_start
+        description: "Containing day start, UTC."
+      - name: weekday
+        description: "Day of week (Mon..Sun)."
+      - name: hour_of_day
+        description: "Hour of day 0-23."

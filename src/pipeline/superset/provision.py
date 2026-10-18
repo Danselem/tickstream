@@ -118,10 +118,12 @@ def athena_uri(
     )
 
 
-def adhoc_metric(column: str, aggregate: str) -> dict[str, Any]:
+def adhoc_metric(
+    column: str, aggregate: str, *, label: str | None = None
+) -> dict[str, Any]:
     """Minimal SIMPLE metric; Superset resolves the column against the dataset."""
     return {
-        "label": f"{aggregate}({column})",
+        "label": label or f"{aggregate}({column})",
         "expressionType": "SIMPLE",
         "column": {"column_name": column},
         "aggregate": aggregate,
@@ -202,6 +204,88 @@ def table_params(
     params["server_pagination"] = True
     params["table_timestamp_format"] = "%Y-%m-%d %H:%M"
     params["show_cell_bars"] = True
+    return params
+
+
+def candlestick_params(
+    dataset_id: int,
+    *,
+    x_axis: str,
+    open_column: str,
+    close_column: str,
+    high_column: str,
+    low_column: str,
+    filters: list[dict[str, Any]] | None = None,
+    series: str | None = None,
+    time_grain_sqla: str | None = None,
+    y_axis_format: str | None = None,
+) -> dict[str, Any]:
+    """OHLC candlestick (viz_type ``candlestick``; metric keys open/close/high/low).
+
+    One row per candle means MAX(open/close) == the value itself; low needs MIN.
+    Set ``series`` (a dimension) so multiple symbols draw separate candle series
+    instead of collapsing into one.
+    """
+    params = _base_params(dataset_id, "candlestick")
+    params["x_axis"] = x_axis
+    params["open"] = adhoc_metric(open_column, "MAX", label="Open")
+    params["close"] = adhoc_metric(close_column, "MAX", label="Close")
+    params["high"] = adhoc_metric(high_column, "MAX", label="High")
+    params["low"] = adhoc_metric(low_column, "MIN", label="Low")
+    params["show_x_axis"] = True
+    params["show_y_axis"] = True
+    params["x_axis_time_format"] = "%H:%M"
+    params["color_by_direction"] = True
+    params["series_style"] = "candlestick"
+    if series:
+        params["series"] = series
+    if time_grain_sqla:
+        params["time_grain_sqla"] = time_grain_sqla
+    if y_axis_format:
+        params["y_axis_format"] = y_axis_format
+    if filters:
+        params["adhoc_filters"] = filters
+    return params
+
+
+def treemap_params(
+    dataset_id: int,
+    *,
+    groupby: list[str],
+    metric: dict[str, Any],
+    filters: list[dict[str, Any]] | None = None,
+    number_format: str | None = None,
+) -> dict[str, Any]:
+    """Proportional treemap (viz_type ``treemap_v2``): metric split by groupby."""
+    params = _base_params(dataset_id, "treemap_v2")
+    params["groupby"] = groupby
+    params["metric"] = metric
+    params["sort_by_metric"] = True
+    params["show_labels"] = True
+    if number_format:
+        params["number_format"] = number_format
+    if filters:
+        params["adhoc_filters"] = filters
+    return params
+
+
+def big_number_params(
+    dataset_id: int,
+    *,
+    metric: dict[str, Any],
+    viz_type: str = "big_number_total",
+    subheader: str | None = None,
+    y_axis_format: str | None = None,
+    time_range: str = TIME_RANGE,
+) -> dict[str, Any]:
+    """Single headline figure (viz_type ``big_number_total``)."""
+    params = _base_params(dataset_id, viz_type, time_range=time_range)
+    params["metric"] = metric
+    if subheader:
+        params["subheader"] = subheader
+    if y_axis_format:
+        params["y_axis_format"] = y_axis_format
+    params["show_timestamp"] = False
     return params
 
 
@@ -314,6 +398,24 @@ def chart_specs(symbols: list[str]) -> list[ChartSpec]:
             },
         ),
         ChartSpec(
+            name=f"{prefix}price — candlestick (1m)",
+            tab=TAB_MARKET,
+            viz_type="candlestick",
+            dataset=GOLD_TABLE,
+            wide=True,
+            params={
+                "x_axis": "candle_start",
+                "time_grain_sqla": "PT1M",
+                "open": "open",
+                "close": "close",
+                "high": "high",
+                "low": "low",
+                "series": "symbol" if groupby else None,
+                "filters": coin,
+                "y_axis_format": ",.4f",
+            },
+        ),
+        ChartSpec(
             name="Market summary — today (UTC)",
             tab=TAB_MARKET,
             viz_type="table",
@@ -357,6 +459,39 @@ def chart_specs(symbols: list[str]) -> list[ChartSpec]:
                 ],
                 "order_by": "window_start",
                 "row_limit": 50,
+            },
+        ),
+        ChartSpec(
+            name="Notional share by coin (today)",
+            tab=TAB_MARKET,
+            viz_type="treemap_v2",
+            dataset=DAILY_SUMMARY_TABLE,
+            params={
+                "groupby": ["symbol"],
+                "metric": adhoc_metric("notional", "SUM"),
+                "number_format": "$,.0f",
+            },
+        ),
+        ChartSpec(
+            name="Total notional today (USD)",
+            tab=TAB_MARKET,
+            viz_type="big_number_total",
+            dataset=DAILY_SUMMARY_TABLE,
+            params={
+                "metric": adhoc_metric("notional", "SUM"),
+                "subheader": "USD notional, last 24h",
+                "y_axis_format": "$,.0f",
+            },
+        ),
+        ChartSpec(
+            name="Trades today",
+            tab=TAB_MARKET,
+            viz_type="big_number_total",
+            dataset=DAILY_SUMMARY_TABLE,
+            params={
+                "metric": adhoc_metric("trade_count", "SUM"),
+                "subheader": "Trades, last 24h",
+                "y_axis_format": ",.0f",
             },
         ),
         ChartSpec(
@@ -420,7 +555,7 @@ def chart_specs(symbols: list[str]) -> list[ChartSpec]:
 
 
 def chart_params(spec: ChartSpec, dataset_id: int) -> dict[str, Any]:
-    """Render a ChartSpec into Superset chart params (table viz differs)."""
+    """Render a ChartSpec into Superset chart params (viz-specific builders)."""
     if spec.viz_type == "table":
         assert isinstance(spec.params["columns"], list)
         assert isinstance(spec.params["order_by"], str)
@@ -431,6 +566,36 @@ def chart_params(spec: ChartSpec, dataset_id: int) -> dict[str, Any]:
             columns=spec.params["columns"],
             order_by=spec.params["order_by"],
             row_limit=limit,
+        )
+    if spec.viz_type == "candlestick":
+        return candlestick_params(
+            dataset_id,
+            x_axis=spec.params["x_axis"],
+            open_column=spec.params["open"],
+            close_column=spec.params["close"],
+            high_column=spec.params["high"],
+            low_column=spec.params["low"],
+            filters=spec.params.get("filters") or None,
+            series=spec.params.get("series"),
+            time_grain_sqla=spec.params.get("time_grain_sqla"),
+            y_axis_format=spec.params.get("y_axis_format"),
+        )
+    if spec.viz_type == "treemap_v2":
+        return treemap_params(
+            dataset_id,
+            groupby=spec.params["groupby"],
+            metric=spec.params["metric"],
+            filters=spec.params.get("filters") or None,
+            number_format=spec.params.get("number_format"),
+        )
+    if spec.viz_type in {"big_number", "big_number_total"}:
+        return big_number_params(
+            dataset_id,
+            metric=spec.params["metric"],
+            viz_type=spec.viz_type,
+            subheader=spec.params.get("subheader"),
+            y_axis_format=spec.params.get("y_axis_format"),
+            time_range=spec.params.get("time_range", TIME_RANGE),
         )
     metrics = spec.params.get("metrics", [])
     filters = spec.params.get("filters")
@@ -539,6 +704,71 @@ def dashboard_layout(
     return nodes
 
 
+def native_filter_configuration(
+    *,
+    symbol_dataset_uuid: str,
+    gold_chart_ids: list[int],
+    all_chart_ids: list[int],
+    market_tab: str,
+    health_tab: str,
+) -> list[dict[str, Any]]:
+    """Dashboard-level native filters: a Symbol selector (Market candles) and a
+    global Time range.
+
+    Filter targets reference datasets by **uuid** (the API list exposes ``id``,
+    but native-filter targets need the uuid), so the caller passes it in.
+    """
+    return [
+        {
+            "id": "NATIVE_FILTER-symbol",
+            "name": "Symbol",
+            "filterType": "filter_select",
+            "targets": [
+                {
+                    "column": {"name": "symbol"},
+                    "datasetUuid": symbol_dataset_uuid,
+                }
+            ],
+            "controlValues": {
+                "enableEmptyFilter": False,
+                "defaultToFirstItem": False,
+                "multiSelect": True,
+                "searchAllOptions": False,
+                "inverseSelection": False,
+            },
+            "defaultDataMask": {
+                "extraFormData": {},
+                "filterState": {},
+                "ownState": {},
+            },
+            "cascadeParentIds": [],
+            "scope": {"rootPath": ["ROOT_ID"], "excluded": []},
+            "type": "NATIVE_FILTER",
+            "description": "",
+            "chartsInScope": gold_chart_ids,
+            "tabsInScope": [market_tab],
+        },
+        {
+            "id": "NATIVE_FILTER-time",
+            "name": "Time range",
+            "filterType": "filter_time",
+            "targets": [{}],
+            "controlValues": {"enableEmptyFilter": False},
+            "defaultDataMask": {
+                "extraFormData": {},
+                "filterState": {},
+                "ownState": {},
+            },
+            "cascadeParentIds": [],
+            "scope": {"rootPath": ["ROOT_ID"], "excluded": []},
+            "type": "NATIVE_FILTER",
+            "description": "",
+            "chartsInScope": all_chart_ids,
+            "tabsInScope": [market_tab, health_tab],
+        },
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Thin Superset REST client (urllib; easy to fake in unit tests)
 # ---------------------------------------------------------------------------
@@ -641,6 +871,10 @@ class Api:
         items = result.get("result", [])
         return [item for item in items if isinstance(item, dict)]
 
+    def get_dataset(self, dataset_id: int) -> dict[str, Any]:
+        detail = self._request("GET", f"/api/v1/dataset/{dataset_id}")
+        return detail.get("result", {}) if isinstance(detail, dict) else {}
+
     def label_columns(self, dataset_id: int, labels: dict[str, str]) -> None:
         """Set human `verbose_name`s so tables/charts read properly.
 
@@ -648,8 +882,7 @@ class Api:
         and ``type`` preserved) because the dataset PUT replaces ``columns``;
         sending only the relabelled subset would drop the rest.
         """
-        detail = self._request("GET", f"/api/v1/dataset/{dataset_id}")
-        result = detail.get("result", {}) if isinstance(detail, dict) else {}
+        result = self.get_dataset(dataset_id)
         columns = result.get("columns") or []
         payload: list[dict[str, Any]] = []
         for column in columns:
@@ -706,10 +939,18 @@ class Api:
         return int(created["id"])
 
     def ensure_dashboard(
-        self, tabs: list[tuple[str, list[tuple[int, str, bool]]]]
+        self,
+        tabs: list[tuple[str, list[tuple[int, str, bool]]]],
+        native_filters: list[dict[str, Any]] | None = None,
     ) -> int:
         layout = dashboard_layout(tabs)
         existing = self._find("dashboard", "slug", DASHBOARD_SLUG)
+        # json_metadata is replaced wholesale on every PUT, so `positions` (chart
+        # linkage) and `native_filter_configuration` must travel together.
+        metadata = {
+            "positions": layout,
+            "native_filter_configuration": native_filters or [],
+        }
         payload = {
             "dashboard_title": DASHBOARD_TITLE,
             "slug": DASHBOARD_SLUG,
@@ -719,7 +960,7 @@ class Api:
             # when `json_metadata` is present and reads `positions` from it to
             # populate the `dashboard_slices` association. The write schemas have
             # no `charts` field (read-only in 6.0), so the layout rides here too.
-            "json_metadata": json.dumps({"positions": layout}),
+            "json_metadata": json.dumps(metadata),
             "published": True,
         }
         if existing:
@@ -771,15 +1012,31 @@ def main() -> None:
         api.label_columns(dataset_id, COLUMN_LABELS)
 
     placed: dict[str, list[tuple[int, str, bool]]] = {tab: [] for tab in TAB_ORDER}
+    gold_chart_ids: list[int] = []
+    all_chart_ids: list[int] = []
     for spec in chart_specs(symbols):
         dataset_id = dataset_ids[spec.dataset]
         params = chart_params(spec, dataset_id)
         chart_id = api.ensure_chart(spec.name, spec.viz_type, dataset_id, params)
         placed[spec.tab].append((chart_id, spec.name, spec.wide))
+        all_chart_ids.append(chart_id)
+        if spec.dataset == GOLD_TABLE:
+            gold_chart_ids.append(chart_id)
         print(f"chart ready: {spec.name} (id={chart_id})", flush=True)
 
+    gold_uuid = api.get_dataset(dataset_ids[GOLD_TABLE]).get("uuid")
+    if not isinstance(gold_uuid, str) or not gold_uuid:
+        raise ProvisionError("gold_candles_1m dataset has no uuid; cannot target filters")
+    filters = native_filter_configuration(
+        symbol_dataset_uuid=gold_uuid,
+        gold_chart_ids=gold_chart_ids,
+        all_chart_ids=all_chart_ids,
+        market_tab=tab_key(TAB_MARKET),
+        health_tab=tab_key(TAB_HEALTH),
+    )
+
     tabs = [(tab, placed[tab]) for tab in TAB_ORDER if placed[tab]]
-    dashboard_id = api.ensure_dashboard(tabs)
+    dashboard_id = api.ensure_dashboard(tabs, filters)
     print(
         f"provisioned database={db_id} datasets={dataset_ids} "
         f"dashboard={dashboard_id} at {base_url}/superset/dashboard/{DASHBOARD_SLUG}/",

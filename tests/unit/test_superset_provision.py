@@ -14,10 +14,14 @@ from pipeline.superset.provision import (
     adhoc_equals,
     adhoc_metric,
     athena_uri,
+    big_number_params,
+    candlestick_params,
     chart_params,
     chart_specs,
     dashboard_layout,
+    native_filter_configuration,
     tab_key,
+    treemap_params,
 )
 
 
@@ -54,7 +58,7 @@ def test_adhoc_builders_shape() -> None:
 
 def test_chart_specs_cover_both_tabs() -> None:
     specs = chart_specs(["XRPUSDT"])
-    assert len(specs) == 11
+    assert len(specs) == 15
     assert {spec.tab for spec in specs} == {provision.TAB_MARKET, provision.TAB_HEALTH}
     assert {spec.dataset for spec in specs} == {
         provision.GOLD_TABLE,
@@ -67,9 +71,11 @@ def test_chart_specs_cover_both_tabs() -> None:
     # Market tab is business-facing; pipeline health tab is the ops view.
     market = [spec for spec in specs if spec.tab == provision.TAB_MARKET]
     health = [spec for spec in specs if spec.tab == provision.TAB_HEALTH]
-    assert len(market) == 7 and len(health) == 4
-    # Summary tables span a full row.
-    assert [spec.name for spec in market if spec.wide] == [
+    assert len(market) == 11 and len(health) == 4
+    # The candlestick and the two summary tables span a full row.
+    wide = [spec.name for spec in market if spec.wide]
+    assert wide == [
+        "XRPUSDT price — candlestick (1m)",
         "Market summary — today (UTC)",
         "Market summary — hourly",
     ]
@@ -85,11 +91,14 @@ def test_chart_specs_single_symbol_filters() -> None:
 
 def test_chart_specs_multi_symbol_groups_by_symbol() -> None:
     specs = chart_specs(["BTCUSDT", "ETHUSDT"])
-    assert len(specs) == 11
+    assert len(specs) == 15
     coin_specs = [spec for spec in specs if spec.dataset == provision.GOLD_TABLE]
-    assert len(coin_specs) == 5
+    assert len(coin_specs) == 6
     for spec in coin_specs:
         params = chart_params(spec, 9)
+        if spec.viz_type == "candlestick":
+            assert params["series"] == "symbol"
+            continue
         assert params["groupby"] == ["symbol"]
         assert "adhoc_filters" not in params
     metrics_specs = [spec for spec in specs if spec.dataset == provision.METRICS_TABLE]
@@ -136,6 +145,60 @@ def test_table_params_get_readability_defaults() -> None:
     params = chart_params(quality, 7)
     assert params["table_timestamp_format"] == "%Y-%m-%d %H:%M"
     assert params["show_cell_bars"] is True
+
+
+def test_candlestick_params_shape() -> None:
+    params = candlestick_params(
+        9,
+        x_axis="candle_start",
+        open_column="open",
+        close_column="close",
+        high_column="high",
+        low_column="low",
+        series="symbol",
+        time_grain_sqla="PT1M",
+        y_axis_format=",.4f",
+    )
+    assert params["viz_type"] == "candlestick"
+    assert params["open"]["aggregate"] == "MAX" and params["open"]["label"] == "Open"
+    assert params["low"]["aggregate"] == "MIN"
+    assert params["series"] == "symbol"
+    assert params["show_x_axis"] is True and params["show_y_axis"] is True
+
+
+def test_treemap_and_big_number_params_shape() -> None:
+    tree = treemap_params(2, groupby=["symbol"], metric=adhoc_metric("notional", "SUM"))
+    assert tree["viz_type"] == "treemap_v2"
+    assert tree["groupby"] == ["symbol"]
+    assert tree["sort_by_metric"] is True
+
+    big = big_number_params(
+        2, metric=adhoc_metric("notional", "SUM"), y_axis_format="$,.0f"
+    )
+    assert big["viz_type"] == "big_number_total"
+    assert big["metric"]["label"] == "SUM(notional)"
+
+
+def test_native_filter_configuration_targets_and_scope() -> None:
+    filters = native_filter_configuration(
+        symbol_dataset_uuid="uuid-1",
+        gold_chart_ids=[1, 2, 6],
+        all_chart_ids=[1, 2, 3],
+        market_tab="TAB-Market",
+        health_tab="TAB-Pipeline-health",
+    )
+    by_id = {flt["id"]: flt for flt in filters}
+    symbol = by_id["NATIVE_FILTER-symbol"]
+    assert symbol["filterType"] == "filter_select"
+    assert symbol["targets"] == [
+        {"column": {"name": "symbol"}, "datasetUuid": "uuid-1"}
+    ]
+    assert symbol["chartsInScope"] == [1, 2, 6]
+    assert symbol["tabsInScope"] == ["TAB-Market"]
+    time = by_id["NATIVE_FILTER-time"]
+    assert time["filterType"] == "filter_time"
+    assert time["targets"] == [{}]
+    assert time["tabsInScope"] == ["TAB-Market", "TAB-Pipeline-health"]
 
 
 def test_tab_key_slug_is_stable() -> None:

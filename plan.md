@@ -15,7 +15,8 @@ two-tab dashboard (ADR-017: Market + Pipeline health). Deviations from this plan
 recorded in docs/decisions.md (ADR-008 ops tables in `tickstream` DB, ADR-009 MERGE
 `update_condition`, ADR-010 `glue:GetTableVersions`, ADR-012a dashboard slice linkage,
 ADR-013 bronze merge, ADR-014 scale-out, ADR-015 cross-replica idempotency, ADR-016
-whole-table integrity check, ADR-017 business summary + tabs).
+whole-table integrity check, ADR-017 business summary + tabs, ADR-018 dashboard
+readability, ADR-019 dimension views, ADR-020 market overview + native filters).
 
 Locked user decisions: (1) bronze idempotency = upsert/MERGE on `(symbol, trade_id)`;
 (2) Great Expectations validates a local PyIceberg scan, not Athena; (3) OpenTofu state in

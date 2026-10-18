@@ -46,15 +46,17 @@ flowchart LR
  5. **Models.** dbt on Athena engine v3: `stg_trades` view → `silver_trades`
     (dedup `row_number()`, 2 h lookback, `update_condition` so identical rows
     skip rewrites) → `gold_candles_1m` (OHLC/volume/USD-notional/VWAP/trade_count/
-    volatility, 30-min recompute) → `gold_market_summary_daily`/`_hourly`
-    (per-symbol open/close/range/notional/%change from a shared macro). 40+ tests,
-    all columns documented.
+     volatility, 30-min recompute) → `gold_market_summary_daily`/`_hourly`
+     (per-symbol open/close/range/notional/%change from a shared macro) →
+     `dim_symbol`/`dim_time` views (ADR-019). 60+ tests, all columns documented.
  6. **Serve.** Superset 6 (derived image + `pyathena[pandas]`, SQLite metadata on
-    a volume) provisioned by a REST script: Athena database, 6 datasets
-    (gold + 2 business summaries + 3 ops tables, never bronze), 10 charts across
-    two native tabs — **Market** (price/VWAP, base volume, USD notional, trades/min,
-    volatility, daily & hourly summary tables) and **Pipeline health** (lag,
-    quality runs, bronze integrity) — one published dashboard.
+     a volume) provisioned by a REST script: Athena database, 6 datasets
+     (gold + 2 business summaries + 3 ops tables, never bronze), 15 charts across
+     two native tabs — **Market** (candlestick OHLC, price/VWAP, base volume, USD
+     notional, trades/min, volatility, notional-share treemap, 2 KPI tiles, daily
+     & hourly summary tables) and **Pipeline health** (lag, batch rows, quality
+     runs, bronze integrity). Native **Symbol** and **Time range** filters (ADR-020);
+     all charts/labels defined in code (ADR-018). One published dashboard.
  7. **Maintain.** Every N scheduler cycles (and via `make maintenance`): Athena
     `OPTIMIZE … REWRITE DATA USING BIN_PACK` + `VACUUM` on the Iceberg tables.
 
