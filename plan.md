@@ -1,13 +1,15 @@
 # Build Plan — `tickstream` (Binance → Kafka → Iceberg → dbt → Superset)
 
-Status: **Phase 0–2 built and verified** (Oct 2026). Phase 0: skeleton + infra applied.
-Phase 1: XRP ingestion live (bronze via upsert, restart/SIGKILL replay-safe).
-Phase 2: dbt silver/gold green (33/33), GX gate blocks dbt on failure,
-scheduler loop + OPTIMIZE/VACUUM live. Deviations from this plan are recorded
-in docs/decisions.md (ADR-008 ops tables in `tickstream` DB, ADR-009 MERGE
-`update_condition`, ADR-010 `glue:GetTableVersions`). Phase 3a (Superset
-dashboard on XRP) built and verified: 5 charts + published dashboard, SQL Lab
-returns live Athena rows (ADR-011/012). Phase 3b (7-coin expansion) not started.
+Status: **Phase 0–3 built; Phase 4 (docs) in progress** (Oct 2026). Phase 0: skeleton +
+infra applied. Phase 1: XRP ingestion live (bronze via upsert, restart/SIGKILL
+replay-safe). Phase 2: dbt silver/gold green (33/33), GX gate blocks dbt on failure,
+scheduler loop + OPTIMIZE/VACUUM live. Phase 3a (Superset dashboard) built and verified:
+5 charts + published dashboard, SQL Lab returns live Athena rows (ADR-011/012). Phase 3b
+(7-coin expansion) built: producer on the combined stream, multi-symbol charts, bronze
+write path rewritten to a pruned-scan merge (ADR-013), consumer scaled to 3 replicas and
+the batch-window stall fixed (ADR-014). Deviations from this plan are recorded in
+docs/decisions.md (ADR-008 ops tables in `tickstream` DB, ADR-009 MERGE `update_condition`,
+ADR-010 `glue:GetTableVersions`, ADR-013 bronze merge, ADR-014 scale-out).
 
 Locked user decisions: (1) bronze idempotency = upsert/MERGE on `(symbol, trade_id)`;
 (2) Great Expectations validates a local PyIceberg scan, not Athena; (3) OpenTofu state in
@@ -96,7 +98,8 @@ runs the module — no functional difference.
 - `confluent-kafka` Consumer: `enable.auto.commit=false`, `auto.offset.reset=earliest`,
   group `bronze-writer`.
 - Batcher: flush on `BATCH_INTERVAL_S` **or** `BATCH_MAX_ROWS`; parse → pyarrow →
-  `table.upsert(batch, join_cols=["symbol","trade_id"])` → **then** `commit(asynchronous=False)`.
+  pruned-scan merge on `(symbol, trade_id)` (ADR-013) → **then** `commit(asynchronous=False)`.
+  The batch window starts *after* a flush, not at drain (ADR-014).
 - On write failure: retry with backoff; never commit → replay safe. Idempotent table
   bootstrap at startup (`create_table_if_not_exists`, partition spec `day(event_time)` +
   `identity(symbol)`, format v2).
@@ -162,7 +165,7 @@ runs the module — no functional difference.
 | **0 – Skeleton + infra** | uv project, ruff/mypy/pytest wired, Makefile, `.env.example`, `common` (Settings/logging/models), OpenTofu (bootstrap → budget alert → resources), docs stubs | `make lint typecheck test` green; `make infra-plan` reviewed → apply approved; budget alert confirmed in console |
 | **1 – XRP ingestion** | Kafka service, producer, consumer, bronze table, unit + replay-idempotency tests | XRP trades land in bronze via `make up`; restart mid-stream creates no duplicates; offsets resume; lag/freshness logged |
 | **2 – Models + quality + schedule** | dbt staging/silver/gold + tests/docs, GX suite, scheduler loop, OPTIMIZE/VACUUM cadence, ops tables | `make quality` → `make dbt-build` green; simulated GX failure blocks dbt; second loop run merges without dupes |
-| **3 – Dashboard + expansion** | Superset service + dashboard, then 6–7 coins via `SYMBOLS` config (combined stream, key=symbol) | Dashboard renders from Athena; multi-coin data correct per symbol |
+| **3 – Dashboard + expansion** | Superset service + dashboard, then 6–7 coins via `SYMBOLS` config (combined stream, key=symbol) | Dashboard renders from Athena; multi-coin data correct per symbol — **done**: 5 charts published, 7 coins ingested |
 | **4 – Docs** | README (diagram, setup, decisions, cost, "what I'd change at scale"), `docs/*` | Brief §11 definition-of-done fully checked |
 
 ## 5. Risks to watch (each with a verification step)

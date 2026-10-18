@@ -106,6 +106,7 @@ def timeseries_params(
     x_axis: str,
     metrics: list[dict[str, Any]],
     filters: list[dict[str, Any]] | None = None,
+    groupby: list[str] | None = None,
     time_grain_sqla: str | None = None,
     y_axis_format: str | None = None,
 ) -> dict[str, Any]:
@@ -114,6 +115,8 @@ def timeseries_params(
     params["metrics"] = metrics
     if filters:
         params["adhoc_filters"] = filters
+    if groupby:
+        params["groupby"] = groupby
     if time_grain_sqla:
         params["time_grain_sqla"] = time_grain_sqla
     if y_axis_format:
@@ -143,12 +146,20 @@ class ChartSpec:
     params: dict[str, Any]
 
 
-def chart_specs(symbol: str) -> list[ChartSpec]:
-    """The five Brief §7 charts. Symbol-scoped so 3b only adds a filter value."""
-    coin = [adhoc_equals("symbol", symbol)]
+def chart_specs(symbols: list[str]) -> list[ChartSpec]:
+    """The five Brief §7 charts. One symbol → symbol-filtered charts; several
+    → one line per symbol via groupby (no chart sprawl as coins are added)."""
+    if len(symbols) == 1:
+        coin: list[dict[str, Any]] = [adhoc_equals("symbol", symbols[0])]
+        groupby: list[str] | None = None
+        prefix = f"{symbols[0]} "
+    else:
+        coin = []
+        groupby = ["symbol"]
+        prefix = ""
     return [
         ChartSpec(
-            name=f"{symbol} price — close vs VWAP (1m)",
+            name=f"{prefix}price — close vs VWAP (1m)",
             viz_type="echarts_timeseries_line",
             dataset=GOLD_TABLE,
             params={
@@ -156,11 +167,12 @@ def chart_specs(symbol: str) -> list[ChartSpec]:
                 "time_grain_sqla": "PT1M",
                 "metrics": [adhoc_metric("close", "AVG"), adhoc_metric("vwap", "AVG")],
                 "filters": coin,
+                "groupby": groupby,
                 "y_axis_format": ",.4f",
             },
         ),
         ChartSpec(
-            name=f"{symbol} volume (1m)",
+            name=f"{prefix}volume (1m)",
             viz_type="echarts_timeseries_bar",
             dataset=GOLD_TABLE,
             params={
@@ -168,11 +180,12 @@ def chart_specs(symbol: str) -> list[ChartSpec]:
                 "time_grain_sqla": "PT1M",
                 "metrics": [adhoc_metric("volume", "SUM")],
                 "filters": coin,
+                "groupby": groupby,
                 "y_axis_format": ",.0f",
             },
         ),
         ChartSpec(
-            name=f"{symbol} volatility (1m log-return stddev)",
+            name=f"{prefix}volatility (1m log-return stddev)",
             viz_type="echarts_timeseries_line",
             dataset=GOLD_TABLE,
             params={
@@ -180,6 +193,7 @@ def chart_specs(symbol: str) -> list[ChartSpec]:
                 "time_grain_sqla": "PT1M",
                 "metrics": [adhoc_metric("volatility", "AVG")],
                 "filters": coin,
+                "groupby": groupby,
                 "y_axis_format": ".2e",
             },
         ),
@@ -232,6 +246,8 @@ def chart_params(spec: ChartSpec, dataset_id: int) -> dict[str, Any]:
     filters = spec.params.get("filters")
     assert isinstance(metrics, list)
     assert filters is None or isinstance(filters, list)
+    dimensions = spec.params.get("groupby")
+    assert dimensions is None or isinstance(dimensions, list)
     grain = spec.params.get("time_grain_sqla")
     assert grain is None or isinstance(grain, str)
     y_format = spec.params.get("y_axis_format")
@@ -243,7 +259,8 @@ def chart_params(spec: ChartSpec, dataset_id: int) -> dict[str, Any]:
         spec.viz_type,
         x_axis=x_axis,
         metrics=metrics,
-        filters=filters,
+        filters=filters or None,
+        groupby=dimensions,
         time_grain_sqla=grain,
         y_axis_format=y_format,
     )
@@ -443,7 +460,8 @@ def _env(name: str) -> str:
 def main() -> None:
     base_url = os.environ.get("SUPERSET_URL", "http://localhost:8088")
     symbols = json.loads(_env("TICKSTREAM_SYMBOLS"))
-    symbol = symbols[0] if symbols else "XRPUSDT"
+    if not symbols:
+        raise ProvisionError("TICKSTREAM_SYMBOLS is empty")
     uri = athena_uri(
         access_key=_env("AWS_ACCESS_KEY_ID"),
         secret_key=_env("AWS_SECRET_ACCESS_KEY"),
@@ -464,7 +482,7 @@ def main() -> None:
     }
 
     charts: list[tuple[int, str]] = []
-    for spec in chart_specs(symbol):
+    for spec in chart_specs(symbols):
         dataset_id = dataset_ids[spec.dataset]
         params = chart_params(spec, dataset_id)
         chart_id = api.ensure_chart(spec.name, spec.viz_type, dataset_id, params)

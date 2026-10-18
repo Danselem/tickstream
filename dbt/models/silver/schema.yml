@@ -10,12 +10,11 @@ models:
             - trade_id
     columns:
       - name: symbol
-        description: "Trading pair."
+        description: "Trading pair (USDT-quoted; set via TICKSTREAM_SYMBOLS)."
         tests:
           - not_null
-          - accepted_values:
-              values: ["XRPUSDT"]
-              quote: true
+          - dbt_utils.expression_is_true:
+              expression: "LIKE '%USDT'"
       - name: trade_id
         description: "Binance trade id (unique per symbol)."
         tests:

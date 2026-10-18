@@ -52,7 +52,7 @@ def test_adhoc_builders_shape() -> None:
 
 
 def test_chart_specs_cover_brief_panels() -> None:
-    specs = chart_specs("XRPUSDT")
+    specs = chart_specs(["XRPUSDT"])
     assert len(specs) == 5
     assert {spec.dataset for spec in specs} == {
         provision.GOLD_TABLE,
@@ -66,15 +66,38 @@ def test_chart_specs_cover_brief_panels() -> None:
     assert all(scoped)
 
 
+def test_chart_specs_single_symbol_filters() -> None:
+    specs = chart_specs(["XRPUSDT"])
+    price = next(spec for spec in specs if spec.viz_type == "echarts_timeseries_line")
+    params = chart_params(price, 9)
+    assert params["adhoc_filters"][0]["comparator"] == "XRPUSDT"
+    assert "groupby" not in params
+
+
+def test_chart_specs_multi_symbol_groups_by_symbol() -> None:
+    specs = chart_specs(["BTCUSDT", "ETHUSDT"])
+    assert len(specs) == 5
+    coin_specs = [spec for spec in specs if spec.dataset == provision.GOLD_TABLE]
+    assert len(coin_specs) == 3
+    for spec in coin_specs:
+        params = chart_params(spec, 9)
+        assert params["groupby"] == ["symbol"]
+        assert "adhoc_filters" not in params
+    lag = next(spec for spec in specs if spec.dataset == provision.METRICS_TABLE)
+    lag_params = chart_params(lag, 9)
+    assert "groupby" not in lag_params
+    assert "adhoc_filters" not in lag_params
+
+
 def test_chart_params_renders_table_and_timeseries() -> None:
-    specs = {spec.viz_type: spec for spec in chart_specs("XRPUSDT")}
+    specs = {spec.viz_type: spec for spec in chart_specs(["XRPUSDT"])}
     table = chart_params(specs["table"], 7)
     assert table["datasource"] == "7__table"
     assert table["query_mode"] == "raw"
     assert "check_at" in table["columns"]
 
     line_spec = next(
-        spec for spec in chart_specs("XRPUSDT") if spec.name.endswith("(1m)")
+        spec for spec in chart_specs(["XRPUSDT"]) if spec.name.endswith("(1m)")
     )
     line = chart_params(line_spec, 9)
     assert line["datasource"] == "9__table"
