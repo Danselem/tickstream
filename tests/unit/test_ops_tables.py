@@ -9,6 +9,7 @@ from pyiceberg.exceptions import NamespaceAlreadyExistsError
 
 from pipeline.common.config import Settings
 from pipeline.common.iceberg import (
+    INTEGRITY_RESULTS_TABLE,
     PIPELINE_METRICS_ARROW_SCHEMA,
     PIPELINE_METRICS_TABLE,
     QUALITY_RESULTS_ARROW_SCHEMA,
@@ -57,8 +58,10 @@ def test_ensure_ops_tables_is_idempotent(tmp_path: Path) -> None:
     second = ensure_ops_tables(catalog, settings.glue_database)
     assert first.quality.name() == (NAMESPACE, QUALITY_RESULTS_TABLE)
     assert first.metrics.name() == (NAMESPACE, PIPELINE_METRICS_TABLE)
+    assert first.integrity.name() == (NAMESPACE, INTEGRITY_RESULTS_TABLE)
     assert first.quality.metadata.location == second.quality.metadata.location
     assert first.metrics.metadata.location == second.metrics.metadata.location
+    assert first.integrity.metadata.location == second.integrity.metadata.location
 
 
 def test_quality_result_arrow_round_trip(tmp_path: Path) -> None:

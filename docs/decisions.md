@@ -240,3 +240,27 @@ Short records of each non-obvious choice: context, decision, consequence.
   because PyIceberg's partitioned upsert is buggy (#3758). Residual duplicates
   are caught by the GX uniqueness gate rather than silently accumulating.
 
+## ADR-016 — Whole-table integrity check on the maintenance cadence
+
+- Context: ADR-015 left the windowed GX uniqueness gate (ADR-002) as the last
+  line of defense. That gate only validates the recent window, so a duplicate
+  introduced *outside* it (e.g. a stale handle replaying an old batch) could
+  hide until the window happened to cover it. The 15.8k-row incident was caught
+  only by a manual full-table query, not by the scheduled run.
+- Decision: add a coarse, low-frequency whole-table check, separate from the
+  frequent windowed GX run.
+  - `quality/integrity.py` scans **only** the key columns (`symbol`, `trade_id`)
+    of the whole bronze table via local PyIceberg (zero Athena cost), computes
+    `duplicates = total_rows - distinct_keys`, and appends one row to a new
+    `tickstream.integrity_results` ops table (ADR-008 conventions).
+  - The scheduler runs it on the **maintenance cadence** (every N cycles, ≈12 h),
+    *before* dbt; `duplicates > 0` fails the cycle and blocks dbt (Brief §6),
+    matching the "a failure stops the run" rule.
+  - Exposed ad hoc as `make integrity` (`--integrity-only`).
+- Consequence: keeps the frequent/cheap windowed gate AND a whole-table safety
+  net, with no extra Athena spend (~19 s to scan 4.3M key rows). Trade-off: the
+  whole-table scan is O(table) in Python, so it is deliberately NOT run every
+  10 min; a duplicate could persist up to one maintenance interval before the
+  run blocks. `integrity_results` also plots duplicate-rate over time in Superset.
+
+

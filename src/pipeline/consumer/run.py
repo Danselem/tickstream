@@ -72,7 +72,14 @@ def main() -> None:
         logger.info("partitions_revoked", partitions=[p.partition for p in partitions])
         _flush()
 
-    consumer.subscribe([settings.topic], on_revoke=_on_revoke)
+    def _on_lost(_consumer: Consumer, partitions: list[TopicPartition]) -> None:
+        # Lost without a clean revoke (e.g. max.poll exceeded): offsets cannot be
+        # committed here; the new owner replays and the anti-join absorbs it.
+        logger.error("partitions_lost", partitions=[p.partition for p in partitions])
+
+    consumer.subscribe(
+        [settings.topic], on_revoke=_on_revoke, on_lost=_on_lost
+    )
     logger.info("consumer_started", topic=settings.topic, group=settings.consumer_group)
 
     signal.signal(signal.SIGTERM, _stop)

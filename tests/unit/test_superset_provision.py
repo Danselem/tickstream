@@ -53,14 +53,16 @@ def test_adhoc_builders_shape() -> None:
 
 def test_chart_specs_cover_brief_panels() -> None:
     specs = chart_specs(["XRPUSDT"])
-    assert len(specs) == 5
+    assert len(specs) == 6
     assert {spec.dataset for spec in specs} == {
         provision.GOLD_TABLE,
         provision.QUALITY_TABLE,
         provision.METRICS_TABLE,
+        provision.INTEGRITY_TABLE,
     }
     scoped = [
-        "XRPUSDT" in spec.name or "health" in spec.name.lower() or "lag" in spec.name.lower()
+        "XRPUSDT" in spec.name
+        or any(word in spec.name.lower() for word in ("health", "lag", "integrity"))
         for spec in specs
     ]
     assert all(scoped)
@@ -76,7 +78,7 @@ def test_chart_specs_single_symbol_filters() -> None:
 
 def test_chart_specs_multi_symbol_groups_by_symbol() -> None:
     specs = chart_specs(["BTCUSDT", "ETHUSDT"])
-    assert len(specs) == 5
+    assert len(specs) == 6
     coin_specs = [spec for spec in specs if spec.dataset == provision.GOLD_TABLE]
     assert len(coin_specs) == 3
     for spec in coin_specs:

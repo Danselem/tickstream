@@ -74,3 +74,26 @@ class QualityResult(BaseModel):
     rows_scanned: int = Field(default=0, ge=0)
     failed_expectations: tuple[str, ...] = ()
     run_ms: float = Field(default=0.0, ge=0)
+
+
+class IntegrityResult(BaseModel):
+    """Outcome of one whole-table bronze integrity check (ADR-016).
+
+    A coarse, low-frequency check: the windowed GX uniqueness gate is frequent
+    and cheap, but only sees the recent window; this counts duplicates across the
+    whole table so a cross-window duplicate cannot hide.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    checked_at: datetime
+    table_name: str
+    total_rows: int = Field(ge=0)
+    distinct_keys: int = Field(ge=0)
+    duplicates: int = Field(ge=0)
+    run_ms: float = Field(default=0.0, ge=0)
+
+    @property
+    def ok(self) -> bool:
+        return self.duplicates == 0
+

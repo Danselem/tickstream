@@ -12,6 +12,7 @@ from collections.abc import Callable, Sequence
 from pipeline.common.config import Settings, get_settings
 from pipeline.common.logging import configure_logging, get_logger
 from pipeline.quality import run_quality
+from pipeline.quality.integrity import run_integrity
 from pipeline.scheduler.dbt_runner import run_dbt_build
 from pipeline.scheduler.maintenance import MAINTENANCE_TABLES, run_maintenance
 from pipeline.scheduler.repair import run_dedup
@@ -49,6 +50,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="one-time bronze dedup rewrite via Athena (stop consumers first)",
     )
+    parser.add_argument(
+        "--integrity-only",
+        action="store_true",
+        help="run the whole-table bronze duplicate check and exit",
+    )
     return parser.parse_args(argv)
 
 
@@ -61,7 +67,9 @@ def run_maintenance_only(settings: Settings, tables: Sequence[str]) -> int:
 def run_once(
     settings: Settings, *, quality_only: bool = False, with_maintenance: bool = False
 ) -> int:
-    """One cycle. Returns 0 on full success, 1 on GX failure, dbt's code otherwise."""
+    """One cycle. Returns 0 on full success, 1 on GX/integrity failure, dbt's
+    code otherwise. The whole-table integrity check runs on maintenance cycles,
+    before dbt, so a duplicate blocks the build (Brief §6)."""
     quality = run_quality(settings)
     if not quality.success:
         logger.error(
@@ -70,6 +78,15 @@ def run_once(
             rows_scanned=quality.rows_scanned,
         )
         return 1
+    if with_maintenance:
+        integrity = run_integrity(settings)
+        if not integrity.ok:
+            logger.error(
+                "integrity_failed_dbts_skipped",
+                duplicates=integrity.duplicates,
+                total_rows=integrity.total_rows,
+            )
+            return 1
     if not quality_only:
         dbt_returncode = run_dbt_build()
         if dbt_returncode != 0:
@@ -94,6 +111,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     configure_logging(settings.log_level)
     if args.dedup_bronze:
         return 0 if run_dedup(settings).ok else 1
+    if args.integrity_only:
+        return 0 if run_integrity(settings).ok else 1
     if args.maintenance_only:
         tables = tuple(t.strip() for t in args.tables.split(",") if t.strip())
         return run_maintenance_only(settings, tables)

@@ -37,7 +37,12 @@ from pyiceberg.types import (
 )
 
 from pipeline.common.config import Settings
-from pipeline.common.models import BatchReport, QualityResult, TradeEvent
+from pipeline.common.models import (
+    BatchReport,
+    IntegrityResult,
+    QualityResult,
+    TradeEvent,
+)
 
 BRONZE_TABLE = "bronze_trades"
 # Bronze identity: every layer (merge here, silver dedup, GX uniqueness) keys on these.
@@ -48,14 +53,16 @@ BRONZE_KEYS = ["symbol", "trade_id"]
 # them via Athena in Phase 3.
 QUALITY_RESULTS_TABLE = "quality_results"
 PIPELINE_METRICS_TABLE = "pipeline_metrics"
+INTEGRITY_RESULTS_TABLE = "integrity_results"
 
 
 @dataclass(frozen=True)
 class OpsTables:
-    """Handles for the two ops tables (named fields — never rely on order)."""
+    """Handles for the ops tables (named fields — never rely on order)."""
 
     quality: Table
     metrics: Table
+    integrity: Table
 
 BRONZE_ARROW_SCHEMA = pa.schema(
     [
@@ -232,6 +239,17 @@ PIPELINE_METRICS_ARROW_SCHEMA = pa.schema(
     ]
 )
 
+INTEGRITY_RESULTS_ARROW_SCHEMA = pa.schema(
+    [
+        pa.field("checked_at", pa.timestamp("us"), nullable=False),
+        pa.field("table_name", pa.string(), nullable=False),
+        pa.field("total_rows", pa.int64(), nullable=False),
+        pa.field("distinct_keys", pa.int64(), nullable=False),
+        pa.field("duplicates", pa.int64(), nullable=False),
+        pa.field("run_ms", pa.float64(), nullable=False),
+    ]
+)
+
 
 def quality_results_schema() -> Schema:
     """Ops table: one row per GX run (append-only; replays may duplicate rows)."""
@@ -254,6 +272,18 @@ def pipeline_metrics_schema() -> Schema:
         NestedField(3, "max_event_time", TimestampType(), required=False),
         NestedField(4, "lag_messages", LongType(), required=True),
         NestedField(5, "commit_ms", DoubleType(), required=True),
+    )
+
+
+def integrity_results_schema() -> Schema:
+    """Ops table: one row per whole-table integrity check (ADR-016, append-only)."""
+    return Schema(
+        NestedField(1, "checked_at", TimestampType(), required=True),
+        NestedField(2, "table_name", StringType(), required=True),
+        NestedField(3, "total_rows", LongType(), required=True),
+        NestedField(4, "distinct_keys", LongType(), required=True),
+        NestedField(5, "duplicates", LongType(), required=True),
+        NestedField(6, "run_ms", DoubleType(), required=True),
     )
 
 
@@ -300,7 +330,7 @@ def metrics_to_arrow(report: BatchReport, collected_at: datetime) -> pa.Table:
 
 
 def ensure_ops_tables(catalog: Catalog, database: str) -> "OpsTables":
-    """Create quality_results + pipeline_metrics if absent (idempotent)."""
+    """Create quality_results + pipeline_metrics + integrity_results if absent."""
     properties = {"format-version": "2", "write.format.default": "parquet"}
     quality = catalog.create_table_if_not_exists(
         f"{database}.{QUALITY_RESULTS_TABLE}",
@@ -312,7 +342,29 @@ def ensure_ops_tables(catalog: Catalog, database: str) -> "OpsTables":
         schema=pipeline_metrics_schema(),
         properties=properties,
     )
-    return OpsTables(quality=quality, metrics=metrics)
+    integrity = catalog.create_table_if_not_exists(
+        f"{database}.{INTEGRITY_RESULTS_TABLE}",
+        schema=integrity_results_schema(),
+        properties=properties,
+    )
+    return OpsTables(quality=quality, metrics=metrics, integrity=integrity)
+
+
+def integrity_result_to_arrow(result: IntegrityResult) -> pa.Table:
+    """Convert an IntegrityResult to Arrow for the integrity_results ops table."""
+    return pa.Table.from_pylist(
+        [
+            {
+                "checked_at": _naive_utc(result.checked_at),
+                "table_name": result.table_name,
+                "total_rows": result.total_rows,
+                "distinct_keys": result.distinct_keys,
+                "duplicates": result.duplicates,
+                "run_ms": result.run_ms,
+            }
+        ],
+        schema=INTEGRITY_RESULTS_ARROW_SCHEMA,
+    )
 
 
 def append_arrow(table: Table, df: pa.Table) -> None:

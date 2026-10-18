@@ -22,6 +22,7 @@ DATABASE_NAME = "tickstream_athena"
 GOLD_TABLE = "gold_candles_1m"
 QUALITY_TABLE = "quality_results"
 METRICS_TABLE = "pipeline_metrics"
+INTEGRITY_TABLE = "integrity_results"
 DASHBOARD_SLUG = "tickstream"
 DASHBOARD_TITLE = "Tickstream — crypto pipeline"
 
@@ -224,6 +225,16 @@ def chart_specs(symbols: list[str]) -> list[ChartSpec]:
                 ],
                 "order_by": "check_at",
                 "row_limit": 20,
+            },
+        ),
+        ChartSpec(
+            name="Bronze integrity — duplicate keys over time",
+            viz_type="echarts_timeseries_line",
+            dataset=INTEGRITY_TABLE,
+            params={
+                "x_axis": "checked_at",
+                "metrics": [adhoc_metric("duplicates", "MAX")],
+                "y_axis_format": ",.0f",
             },
         ),
     ]
@@ -476,7 +487,7 @@ def main() -> None:
     schema = _env("TICKSTREAM_GLUE_DATABASE")
     dataset_ids = {
         table: api.ensure_dataset(db_id, schema, table)
-        for table in (GOLD_TABLE, QUALITY_TABLE, METRICS_TABLE)
+        for table in (GOLD_TABLE, QUALITY_TABLE, METRICS_TABLE, INTEGRITY_TABLE)
     }
 
     charts: list[tuple[int, str]] = []

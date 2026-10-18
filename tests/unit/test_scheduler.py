@@ -5,13 +5,24 @@ from datetime import UTC, datetime
 import pytest
 
 from pipeline.common.config import Settings
-from pipeline.common.models import QualityResult
+from pipeline.common.models import IntegrityResult, QualityResult
 from pipeline.scheduler import run as run_module
 from pipeline.scheduler.run import parse_args, run_once
 
 
 def _settings() -> Settings:
     return Settings()
+
+
+def _ok_integrity() -> IntegrityResult:
+    now = datetime.now(UTC)
+    return IntegrityResult(
+        checked_at=now,
+        table_name="bronze_trades",
+        total_rows=100,
+        distinct_keys=100,
+        duplicates=0,
+    )
 
 
 def _ok_result() -> QualityResult:
@@ -79,16 +90,21 @@ def test_quality_only_with_maintenance_skips_dbt_but_compacts(
         calls.append("dbt")
         return 0
 
+    def fake_integrity(settings: Settings) -> IntegrityResult:
+        calls.append("integrity")
+        return _ok_integrity()
+
     def fake_maintenance(settings: Settings) -> list[object]:
         calls.append("maintenance")
         return []
 
     monkeypatch.setattr(run_module, "run_quality", fake_quality)
     monkeypatch.setattr(run_module, "run_dbt_build", fake_dbt)
+    monkeypatch.setattr(run_module, "run_integrity", fake_integrity)
     monkeypatch.setattr(run_module, "run_maintenance", fake_maintenance)
 
     assert run_once(_settings(), quality_only=True, with_maintenance=True) == 0
-    assert calls == ["maintenance"]
+    assert calls == ["integrity", "maintenance"]
 
 
 def test_pass_runs_dbt_then_maintenance(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -101,16 +117,42 @@ def test_pass_runs_dbt_then_maintenance(monkeypatch: pytest.MonkeyPatch) -> None
         calls.append("dbt")
         return 0
 
+    def fake_integrity(settings: Settings) -> IntegrityResult:
+        calls.append("integrity")
+        return _ok_integrity()
+
     def fake_maintenance(settings: Settings) -> list[object]:
         calls.append("maintenance")
         return []
 
     monkeypatch.setattr(run_module, "run_quality", fake_quality)
     monkeypatch.setattr(run_module, "run_dbt_build", fake_dbt)
+    monkeypatch.setattr(run_module, "run_integrity", fake_integrity)
     monkeypatch.setattr(run_module, "run_maintenance", fake_maintenance)
 
     assert run_once(_settings(), with_maintenance=True) == 0
-    assert calls == ["dbt", "maintenance"]
+    assert calls == ["integrity", "dbt", "maintenance"]
+
+
+def test_integrity_failure_blocks_dbt(monkeypatch: pytest.MonkeyPatch) -> None:
+    dbt_calls: list[str] = []
+
+    def fake_quality(settings: Settings) -> QualityResult:
+        return _ok_result()
+
+    def fake_integrity(settings: Settings) -> IntegrityResult:
+        return _ok_integrity().model_copy(update={"distinct_keys": 99, "duplicates": 1})
+
+    def fake_dbt() -> int:
+        dbt_calls.append("dbt")
+        return 0
+
+    monkeypatch.setattr(run_module, "run_quality", fake_quality)
+    monkeypatch.setattr(run_module, "run_integrity", fake_integrity)
+    monkeypatch.setattr(run_module, "run_dbt_build", fake_dbt)
+
+    assert run_once(_settings(), with_maintenance=True) == 1
+    assert dbt_calls == []
 
 
 def test_dbt_failure_propagates_without_maintenance(
@@ -121,11 +163,15 @@ def test_dbt_failure_propagates_without_maintenance(
     def fake_quality(settings: Settings) -> QualityResult:
         return _ok_result()
 
+    def fake_integrity(settings: Settings) -> IntegrityResult:
+        return _ok_integrity()
+
     def fake_maintenance(settings: Settings) -> list[object]:
         maintenance_calls.append("maintenance")
         return []
 
     monkeypatch.setattr(run_module, "run_quality", fake_quality)
+    monkeypatch.setattr(run_module, "run_integrity", fake_integrity)
     monkeypatch.setattr(run_module, "run_dbt_build", lambda: 2)
     monkeypatch.setattr(run_module, "run_maintenance", fake_maintenance)
 
@@ -153,6 +199,11 @@ def test_parse_args_maintenance_only_and_tables() -> None:
         "silver_trades",
         "gold_candles_1m",
     }
+
+
+def test_parse_args_integrity_only() -> None:
+    assert parse_args(["--integrity-only"]).integrity_only is True
+    assert parse_args([]).integrity_only is False
 
 
 def test_maintenance_only_bypasses_quality_and_dbt(
