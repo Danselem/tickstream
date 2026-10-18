@@ -191,6 +191,7 @@ def test_ensure_chart_and_dashboard_create_path() -> None:
             ("POST", "/api/v1/chart/"): {"id": 11},
             ("GET", "/api/v1/dashboard/"): {"result": []},
             ("POST", "/api/v1/dashboard/"): {"id": 21},
+            ("PUT", "/api/v1/dashboard/21"): {"id": 21},
         },
     )
     chart_id = api.ensure_chart("c", "table", 7, {"a": 1})
@@ -203,10 +204,31 @@ def test_ensure_chart_and_dashboard_create_path() -> None:
     layout = json.loads(dash_post[2]["position_json"])
     assert layout["CHART-11"]["meta"]["chartId"] == 11
     assert dash_post[2]["published"] is True
+    # Create alone does not link charts; a follow-up PUT carries the layout so
+    # set_dash_metadata populates dashboard_slices.
+    put = next(call for call in transport.calls if call[0] == "PUT")
+    assert json.loads(put[2]["json_metadata"])["positions"]["CHART-11"]["meta"][
+        "chartId"
+    ] == 11
+
+
+def test_ensure_chart_finds_name_with_plus_without_duplicating() -> None:
+    """The server-side slice_name filter drops "+"; match in Python instead."""
+    api, transport = _api_with(
+        {
+            ("GET", "/api/v1/chart/"): {
+                "result": [{"id": 7, "slice_name": "Consumer lag + batch rows"}]
+            },
+            ("PUT", "/api/v1/chart/7"): {"id": 7},
+        },
+    )
+    assert api.ensure_chart("Consumer lag + batch rows", "line", 1, {}) == 7
+    assert [call[0] for call in transport.calls] == ["GET", "PUT"]
 
 
 def test_ensure_dashboard_update_omits_charts_field() -> None:
-    """Superset's dashboard PUT schema rejects `charts`; position_json links them."""
+    """Superset 6.0's dashboard PUT schema has no `charts`; linkage comes from
+    json_metadata.positions."""
     api, transport = _api_with(
         {
             ("GET", "/api/v1/dashboard/"): {"result": [{"id": 21}]},
@@ -217,6 +239,9 @@ def test_ensure_dashboard_update_omits_charts_field() -> None:
     put = next(call for call in transport.calls if call[0] == "PUT")
     assert "charts" not in put[2]
     assert "position_json" in put[2] and put[2]["published"] is True
+    positions = json.loads(put[2]["json_metadata"])["positions"]
+    assert positions["CHART-11"]["meta"]["chartId"] == 11
+    assert positions["CHART-12"]["meta"]["chartId"] == 12
 
 
 def test_login_sets_bearer_token() -> None:

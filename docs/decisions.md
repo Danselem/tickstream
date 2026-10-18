@@ -137,6 +137,28 @@ Short records of each non-obvious choice: context, decision, consequence.
   principal, check CloudTrail, read the driver source in the image.
 - Consequence: dataset sync + SQL Lab verified working; dashboard shows live data.
 
+### ADR-012a — Dashboard↔chart linkage on Superset 6.0 (and the `+` in chart names)
+- Context: the dashboard rendered every tile as "There is no chart definition
+  associated with this component, could it have been deleted?". Root cause: in
+  Superset **6.0.0** the dashboard **write** schemas have no `charts` field (it
+  is read-only), and the `dashboard_slices` association is populated *only* by
+  `DashboardDAO.set_dash_metadata`, which `UpdateDashboardCommand` runs when
+  `json_metadata` is present and reads `positions` from it. `CreateDashboardCommand`
+  never syncs slices. Our provision script sent `position_json` but no
+  `json_metadata`, so `dashboard_slices` stayed empty and the frontend could not
+  resolve any chart. Separately, `ensure_chart` matched by name through the list
+  API's `slice_name eq` filter, which returns **no rows** for names containing
+  `+` ("Consumer lag + batch rows"), so that chart was re-created on every run
+  (11 duplicates) while every other name stayed single.
+- Decision: send `json_metadata = {"positions": layout}` on the dashboard PUT
+  (and always issue a PUT after create so slices link); match charts by listing
+  and comparing `slice_name` in Python (mirrors the existing dataset helper)
+  rather than trusting the server-side name filter.
+- Consequence: `dashboard_slices` is populated, all tiles render, and provisioning
+  is truly idempotent (chart count stable across runs). Verified by reading the
+  metadata DB directly and by running `make superset` twice.
+
+
 ## ADR-013 — Bronze write path: pruned-scan merge, transient retry, S3 timeouts
 
 - Context: Oct 2026 incident after the 7-coin launch. Three stacked failures:

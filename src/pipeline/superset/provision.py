@@ -419,10 +419,25 @@ class Api:
         items = result.get("result", [])
         return [item for item in items if isinstance(item, dict)]
 
+    def _all_charts(self) -> list[dict[str, Any]]:
+        result = self._request("GET", "/api/v1/chart/")
+        items = result.get("result", [])
+        return [item for item in items if isinstance(item, dict)]
+
+    def _find_chart(self, name: str) -> dict[str, Any] | None:
+        # Match in Python, not via the list API's `slice_name eq` filter: that
+        # server-side filter returns no rows for names containing "+" (e.g.
+        # "Consumer lag + batch rows"), so ensure_chart re-created the chart on
+        # every provisioning run (chart sprawl).
+        for item in self._all_charts():
+            if item.get("slice_name") == name:
+                return item
+        return None
+
     def ensure_chart(
         self, name: str, viz_type: str, dataset_id: int, params: dict[str, Any]
     ) -> int:
-        existing = self._find("chart", "slice_name", name)
+        existing = self._find_chart(name)
         payload = {
             "slice_name": name,
             "viz_type": viz_type,
@@ -443,15 +458,23 @@ class Api:
             "dashboard_title": DASHBOARD_TITLE,
             "slug": DASHBOARD_SLUG,
             "position_json": json.dumps(layout),
+            # Superset 6.0 links dashboard<->charts only through
+            # DashboardDAO.set_dash_metadata, which UpdateDashboardCommand runs
+            # when `json_metadata` is present and reads `positions` from it to
+            # populate the `dashboard_slices` association. The write schemas have
+            # no `charts` field (read-only in 6.0), so the layout rides here too.
+            "json_metadata": json.dumps({"positions": layout}),
             "published": True,
         }
         if existing:
-            # Linkage is derived from position_json (as on create); the dashboard
-            # PUT schema rejects an explicit `charts` field (Superset 4.x).
             self._request("PUT", f"/api/v1/dashboard/{existing['id']}", payload)
             return int(existing["id"])
         created = self._request("POST", "/api/v1/dashboard/", payload)
-        return int(created["id"])
+        dashboard_id = int(created["id"])
+        # CreateDashboardCommand does NOT sync slices; a follow-up PUT triggers
+        # set_dash_metadata so the dashboard actually has its charts linked.
+        self._request("PUT", f"/api/v1/dashboard/{dashboard_id}", payload)
+        return dashboard_id
 
 
 # ---------------------------------------------------------------------------
