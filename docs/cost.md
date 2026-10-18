@@ -21,6 +21,12 @@ Guardrails (Brief §10). Estimates became actuals once the pipeline ran.
 | Athena | **$0.009** | Partition-pruned dbt builds + dashboard queries; GX runs locally. |
 | Budget alert | $0 used of $20 | Never close. (RDS $0.12 in the same account is unrelated to this project.) |
 
+After the 7-coin expansion (18 Oct): the lake is **≈1.08 GB / 14,505 objects**
+(up from 481 MB / 11k with XRP alone). Storage is still ≪ $0.10/mo; the object
+count — and thus request cost — is what OPTIMIZE + lifecycle rules target. The
+whole-table integrity check (ADR-016) scans locally, so it adds **$0** Athena
+spend (~19 s for 4.3M key rows).
+
 Model check: 7 coins run ~150–200 events/s (~15M/day). Bronze Parquet ≈ tens of
 bytes/row → ~1 GB/day; 30-day retention ≈ tens of GB ≈ single-digit dollars
 all-in. Athena stays in cents while every query prunes to day+symbol partitions.

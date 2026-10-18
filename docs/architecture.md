@@ -9,6 +9,8 @@ flowchart LR
     SCHED[scheduler loop<br/>every 10 min] --> GX[Great Expectations<br/>local PyIceberg scan<br/>schema/nulls/range/unique/fresh]
     GX -->|pass| DBT[dbt on Athena<br/>stg view → silver merge<br/>→ gold 1m candles]
     GX -->|fail| BLOCK[block dbt<br/>report to quality_results]
+    SCHED -.->|every N cycles| INT[whole-table integrity<br/>duplicate keys, local scan<br/>→ integrity_results]
+    INT -->|duplicates>0| BLOCK
     DBT --> SUP[Superset 6<br/>pyathena, REST-provisioned<br/>5 charts, published]
     S3 --> SUP
     DBT -.->|OPTIMIZE + VACUUM| S3
@@ -36,7 +38,11 @@ flowchart LR
    required columns, no nulls in keys, `price/qty > 0`, `symbol:trade_id`
    uniqueness, freshness ≤ 300 s, row count ≥ 1. JSON report to
    `quality/reports/` + row to `tickstream.quality_results`. Failure → nonzero
-   exit → scheduler skips dbt (and doesn't advance the window).
+   exit → scheduler skips dbt (and doesn't advance the window). On the
+   maintenance cadence the scheduler also runs a **whole-table** integrity check
+   (ADR-016): a local scan of the key columns only, `duplicates = rows −
+   distinct_keys`, recorded in `tickstream.integrity_results`; any duplicate
+   blocks dbt.
 5. **Models.** dbt on Athena engine v3: `stg_trades` view → `silver_trades`
    (dedup `row_number()`, 2 h lookback, `update_condition` so identical rows
    skip rewrites) → `gold_candles_1m` (OHLC/volume/VWAP/trade_count/volatility,
@@ -68,6 +74,12 @@ SIGKILL, 20k replay batch → 2 appended / 19,998 skipped).
   already expired and every batch flushed at one message. Looked like a stuck
   client but was control flow. Fixed by starting the window after the flush
   (ADR-014); regression-tested.
+- **Cross-replica duplication on rebalance (15.8k rows)** → each replica caches
+  its own Iceberg `Table` handle and only sees its own appends, so on a
+  rebalance the new owner replayed a batch the old owner had written and
+  re-appended it. Fixed with `table.refresh()` before the anti-join scan +
+  `cooperative-sticky` + commit-on-revoke (ADR-015); the whole-table integrity
+  check (ADR-016) is the backstop.
 - **Kafka single-broker SPOF** → broker SIGKILLed during a 4-day host outage;
   volume-held data survived, ~1M backlog drained at ~20k/batch on restart.
   Accepted for MVP (ADR: multi-broker deferred), documented here instead.

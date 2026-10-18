@@ -1,15 +1,18 @@
 # Build Plan — `tickstream` (Binance → Kafka → Iceberg → dbt → Superset)
 
-Status: **Phase 0–3 built; Phase 4 (docs) in progress** (Oct 2026). Phase 0: skeleton +
+Status: **Phases 0–4 complete** (Oct 2026). Phase 0: skeleton +
 infra applied. Phase 1: XRP ingestion live (bronze via upsert, restart/SIGKILL
 replay-safe). Phase 2: dbt silver/gold green (33/33), GX gate blocks dbt on failure,
 scheduler loop + OPTIMIZE/VACUUM live. Phase 3a (Superset dashboard) built and verified:
 5 charts + published dashboard, SQL Lab returns live Athena rows (ADR-011/012). Phase 3b
 (7-coin expansion) built: producer on the combined stream, multi-symbol charts, bronze
 write path rewritten to a pruned-scan merge (ADR-013), consumer scaled to 3 replicas and
-the batch-window stall fixed (ADR-014). Deviations from this plan are recorded in
+the batch-window stall fixed (ADR-014); a rebalance-duplication incident was fixed with
+refresh-before-scan + commit-on-revoke (ADR-015) and repaired once. Phase 4 (docs) done;
+Brief §11 definition-of-done fully checked. Deviations from this plan are recorded in
 docs/decisions.md (ADR-008 ops tables in `tickstream` DB, ADR-009 MERGE `update_condition`,
-ADR-010 `glue:GetTableVersions`, ADR-013 bronze merge, ADR-014 scale-out).
+ADR-010 `glue:GetTableVersions`, ADR-013 bronze merge, ADR-014 scale-out, ADR-015
+cross-replica idempotency, ADR-016 whole-table integrity check).
 
 Locked user decisions: (1) bronze idempotency = upsert/MERGE on `(symbol, trade_id)`;
 (2) Great Expectations validates a local PyIceberg scan, not Athena; (3) OpenTofu state in

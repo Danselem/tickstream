@@ -26,8 +26,9 @@ make infra-apply       # explicit human approval required
 make up                # all services; dashboard at http://localhost:8088
 ```
 
-`make help` lists everything: `quality`, `dbt-build`, `maintenance`, `superset`
-(re-provision dashboard), `logs`, infra targets.
+`make help` lists everything: `quality`, `dbt-build`, `maintenance`, `integrity`
+(whole-table duplicate check), `superset` (re-provision dashboard), `logs`, infra
+targets.
 
 ## How it works
 
@@ -36,6 +37,7 @@ Binance WS (combined stream, 7 coins) ──producer──▶ Kafka trades.raw (
   ──consumer (45 s / 20k-row micro-batches)──▶ S3 Iceberg bronze (Glue catalog)
 scheduler loop (10 min): GX check (local PyIceberg scan) ──pass──▶ dbt build
                          └──fail──▶ block dbt, report to tickstream.quality_results
+                         every N cycles: whole-table duplicate check (integrity_results)
 daily-ish: Athena OPTIMIZE + VACUUM (bronze/silver/gold)
 Superset ──pyathena──▶ Athena (gold candles, ops health tables)
 ```
@@ -57,23 +59,27 @@ quality/suites/bronze_suite.json    GX suite snapshot (reports/ gitignored)
 superset/   image + config + bootstrap + REST provisioning (dashboard as code)
 infra/      OpenTofu: budget alert first, then bucket/Glue/Athena/IAM
 scheduler/  (in src) quality → dbt → maintenance loop
-tests/      pytest, 66 unit + integration (Kafka roundtrip, replay idempotency)
-docs/       architecture, decisions (13 ADRs), cost (with actuals), runbook
+tests/      pytest, 84 unit + integration (Kafka roundtrip, replay idempotency)
+docs/       architecture, decisions (16 ADRs), cost (with actuals), runbook
 ```
 
 ## Verification highlights
 
 - Restart + SIGKILL mid-stream: 0 duplicates (replay integration test).
-- GX failure injection blocks dbt (exit 1, window not advanced).
+- Cross-replica replay (new owner sees the old owner's commit): 0 duplicates.
+- Live rebalance (scale 3→2→3): 0 new duplicates; `partitions_revoked` logged.
+- GX failure injection blocks dbt (exit 1, window not advanced); whole-table
+  integrity check also blocks dbt when duplicates > 0 (ADR-016).
 - Second dbt build merges new keys only (silver 0 dupes, gold candles stable).
 - 20k-row stale replay batch: 2 appended, 19,998 skipped (overlap absorbed).
-- Maintenance: bronze 348 → 4 files, 0 dupes.
+- Maintenance: bronze 348 → 4 files, 0 dupes; one-time dedup removed 15.8k rows.
 - Dashboard: SQL Lab through Superset returns live Athena rows.
 
 ## Cost (Oct 1–15 actuals)
 
-S3 ≈ $0.61 (481 MB, 11k objects) · Athena ≈ **$0.01** · budget alert $20/mo.
-Details + recommendations: `docs/cost.md`.
+S3 ≈ $0.61 → **1.08 GB / 14.5k objects** after the 7-coin expansion · Athena
+≈ **$0.01** (GX + integrity checks run locally, zero Athena spend) · budget alert
+$20/mo. Details + recommendations: `docs/cost.md`.
 
 ## What I'd change at scale
 

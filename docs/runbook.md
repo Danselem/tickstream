@@ -21,8 +21,9 @@
 ## Daily commands
 
 See `make help`. `make up` / `make down` / `make logs`; `make quality` /
-`make dbt-build` / `make maintenance`; `make superset` re-runs dashboard
-provisioning against the live container (idempotent).
+`make dbt-build` / `make maintenance`; `make integrity` (whole-table duplicate
+check; also runs automatically on maintenance cycles); `make superset` re-runs
+dashboard provisioning against the live container (idempotent).
 
 ## Dashboards
 
@@ -72,8 +73,10 @@ provisioning against the live container (idempotent).
 
 ## Bronze dedup procedure (one-time, ADR-015)
 
-Only needed if bronze holds duplicate `(symbol, trade_id)` — normally caught by
-the GX uniqueness gate after a rebalance with stale replica handles.
+Only needed if bronze holds duplicate `(symbol, trade_id)`. Detected by the
+scheduled whole-table integrity check (ADR-016, `duplicates > 0` blocks dbt and
+shows in `tickstream.integrity_results`); the windowed GX uniqueness gate may
+miss duplicates outside its window.
 
 1. Confirm the damage first (0 expected):
    `SELECT count(*) c, count(DISTINCT symbol||'#'||CAST(trade_id AS varchar)) d
