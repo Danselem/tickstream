@@ -307,5 +307,31 @@ Short records of each non-obvious choice: context, decision, consequence.
   an existing Iceberg table needs a one-off `make dbt-refresh` (no
   `on_schema_change`), and the two summary tables join the OPTIMIZE/VACUUM list.
 
+## ADR-018 — Dashboard readability: explicit labels, legends, and stable tab ids
+
+- Context: the provisioned charts rendered as unlabelled walls of lines — axis
+  titles, legends and time formatting were all left to control-panel defaults,
+  tables showed raw column names (`window_start`, `change_pct`), and the ops
+  chart overlaid lag (messages) and batch rows (count) on one axis. A chart with
+  no labels answers no business question. Tab ids were index-based
+  (`TAB-0`/`TAB-1`), which would silently detach a native filter if a tab moved.
+- Decision: make readability explicit in the provisioning code.
+  - `timeseries_params` always sets `x_axis_title`/`y_axis_title`,
+    `show_legend`+`legendType=scroll`+`legendOrientation=top`,
+    `x_axis_time_format`, `rich_tooltip`+`tooltipTimeFormat`, and
+    `color_scheme`; each `ChartSpec` carries its own axis titles.
+  - A single `COLUMN_LABELS` map feeds `Api.label_columns`, which re-sends the
+    **full** column list (each with its existing `id`, `type`, `is_dttm`) as
+    `verbose_name`; a partial list would drop columns, and omitting `id` fails
+    with "columns already exist".
+  - Tables get `table_timestamp_format` + `show_cell_bars`; the ops "lag + rows"
+    chart is split into two charts (different units do not belong on one axis).
+  - `dashboard_layout` derives tab ids from the title (`TAB-Market`,
+    `TAB-Pipeline-health`) via `tab_key`, so `tabsInScope` stays stable.
+- Consequence: charts are self-describing and safe to reorder; the label/legend
+  settings are code (unit-tested) rather than per-chart clicks in the UI, so a
+  rebuilt dashboard is always readable. Trade-off: labels live in a map that
+  must be extended when new columns are surfaced.
+
 
 

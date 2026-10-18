@@ -17,6 +17,7 @@ from pipeline.superset.provision import (
     chart_params,
     chart_specs,
     dashboard_layout,
+    tab_key,
 )
 
 
@@ -53,7 +54,7 @@ def test_adhoc_builders_shape() -> None:
 
 def test_chart_specs_cover_both_tabs() -> None:
     specs = chart_specs(["XRPUSDT"])
-    assert len(specs) == 10
+    assert len(specs) == 11
     assert {spec.tab for spec in specs} == {provision.TAB_MARKET, provision.TAB_HEALTH}
     assert {spec.dataset for spec in specs} == {
         provision.GOLD_TABLE,
@@ -66,7 +67,7 @@ def test_chart_specs_cover_both_tabs() -> None:
     # Market tab is business-facing; pipeline health tab is the ops view.
     market = [spec for spec in specs if spec.tab == provision.TAB_MARKET]
     health = [spec for spec in specs if spec.tab == provision.TAB_HEALTH]
-    assert len(market) == 7 and len(health) == 3
+    assert len(market) == 7 and len(health) == 4
     # Summary tables span a full row.
     assert [spec.name for spec in market if spec.wide] == [
         "Market summary — today (UTC)",
@@ -84,17 +85,19 @@ def test_chart_specs_single_symbol_filters() -> None:
 
 def test_chart_specs_multi_symbol_groups_by_symbol() -> None:
     specs = chart_specs(["BTCUSDT", "ETHUSDT"])
-    assert len(specs) == 10
+    assert len(specs) == 11
     coin_specs = [spec for spec in specs if spec.dataset == provision.GOLD_TABLE]
     assert len(coin_specs) == 5
     for spec in coin_specs:
         params = chart_params(spec, 9)
         assert params["groupby"] == ["symbol"]
         assert "adhoc_filters" not in params
-    lag = next(spec for spec in specs if spec.dataset == provision.METRICS_TABLE)
-    lag_params = chart_params(lag, 9)
-    assert "groupby" not in lag_params
-    assert "adhoc_filters" not in lag_params
+    metrics_specs = [spec for spec in specs if spec.dataset == provision.METRICS_TABLE]
+    assert len(metrics_specs) == 2  # lag and batch rows are separate charts
+    for spec in metrics_specs:
+        params = chart_params(spec, 9)
+        assert "groupby" not in params
+        assert "adhoc_filters" not in params
 
 
 def test_chart_params_renders_table_and_timeseries() -> None:
@@ -113,6 +116,63 @@ def test_chart_params_renders_table_and_timeseries() -> None:
     assert line["adhoc_filters"][0]["comparator"] == "XRPUSDT"
 
 
+def test_timeseries_params_carry_labels_and_legend() -> None:
+    """Readability: axis titles, legend and time format must be explicit."""
+    specs = chart_specs(["XRPUSDT"])
+    price = next(spec for spec in specs if spec.dataset == provision.GOLD_TABLE)
+    params = chart_params(price, 9)
+    assert params["x_axis_title"] == "Time (UTC)"
+    assert params["y_axis_title"] == "Price (USDT)"
+    assert params["show_legend"] is True
+    assert params["legendType"] == "scroll"
+    assert params["x_axis_time_format"] == "%H:%M"
+    assert params["rich_tooltip"] is True
+    assert params["color_scheme"] == "supersetColors"
+
+
+def test_table_params_get_readability_defaults() -> None:
+    specs = chart_specs(["XRPUSDT"])
+    quality = next(spec for spec in specs if spec.dataset == provision.QUALITY_TABLE)
+    params = chart_params(quality, 7)
+    assert params["table_timestamp_format"] == "%Y-%m-%d %H:%M"
+    assert params["show_cell_bars"] is True
+
+
+def test_tab_key_slug_is_stable() -> None:
+    assert tab_key("Market") == "TAB-Market"
+    assert tab_key("Pipeline health") == "TAB-Pipeline-health"
+
+
+def test_label_columns_resends_full_list_preserving_dttm() -> None:
+    api, transport = _api_with(
+        {
+            ("GET", "/api/v1/dataset/4"): {
+                "result": {
+                    "columns": [
+                        {
+                            "id": 10,
+                            "column_name": "check_at",
+                            "is_dttm": True,
+                            "type": "TIMESTAMP",
+                        },
+                        {"id": 11, "column_name": "success", "is_dttm": False},
+                    ]
+                }
+            },
+            ("PUT", "/api/v1/dataset/4"): {"id": 4},
+        },
+    )
+    api.label_columns(4, {"success": "Passed"})
+    put = next(call for call in transport.calls if call[0] == "PUT")
+    columns = {col["column_name"]: col for col in put[2]["columns"]}
+    assert columns["check_at"]["is_dttm"] is True
+    assert columns["check_at"]["verbose_name"] is None  # not in the label map
+    assert columns["success"]["verbose_name"] == "Passed"
+    assert columns["check_at"]["id"] == 10  # existing id kept (avoids re-insert)
+    assert columns["success"]["id"] == 11
+    assert set(columns) == {"check_at", "success"}
+
+
 def test_dashboard_layout_builds_tabs_and_wide_rows() -> None:
     layout = dashboard_layout(
         [
@@ -121,10 +181,13 @@ def test_dashboard_layout_builds_tabs_and_wide_rows() -> None:
         ]
     )
     assert layout["ROOT_ID"]["children"] == ["TABS-main"]
-    assert layout["TABS-main"]["children"] == ["TAB-0", "TAB-1"]
-    assert layout["TAB-0"]["meta"]["text"] == "Market"
-    assert layout["TAB-1"]["children"] == ["ROW-1-0"]
-    assert layout["TAB-0"]["children"] == ["ROW-0-0", "ROW-0-1"]
+    assert layout["TABS-main"]["children"] == [
+        "TAB-Market",
+        "TAB-Pipeline-health",
+    ]
+    assert layout["TAB-Market"]["meta"]["text"] == "Market"
+    assert layout["TAB-Pipeline-health"]["children"] == ["ROW-1-0"]
+    assert layout["TAB-Market"]["children"] == ["ROW-0-0", "ROW-0-1"]
     assert layout["ROW-0-0"]["children"] == ["CHART-1", "CHART-2"]
     assert layout["ROW-0-1"]["children"] == ["CHART-3"]
     assert layout["CHART-1"]["meta"]["width"] == 6

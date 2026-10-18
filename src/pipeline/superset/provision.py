@@ -12,6 +12,7 @@ from __future__ import annotations
 import http.cookiejar
 import json
 import os
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -44,6 +45,37 @@ DATASET_TABLES = (
 )
 
 TIME_RANGE = "Last day"
+
+# Friendly column headers (dataset `verbose_name`). Charts and tables that show
+# raw column names are unreadable to a business viewer, so every dataset gets
+# human labels for the columns we surface. Unknown columns are left untouched.
+COLUMN_LABELS: dict[str, str] = {
+    "symbol": "Symbol",
+    "candle_start": "Time (UTC)",
+    "window_start": "Window (UTC)",
+    "window_end": "Window end (UTC)",
+    "open": "Open",
+    "high": "High",
+    "low": "Low",
+    "close": "Close",
+    "vwap": "VWAP",
+    "volume": "Volume (base)",
+    "notional": "Notional (USD)",
+    "trade_count": "Trades",
+    "trades_per_min": "Trades/min",
+    "change_pct": "Change %",
+    "volatility": "Volatility",
+    "check_at": "Checked at (UTC)",
+    "success": "Passed",
+    "rows_scanned": "Rows scanned",
+    "run_ms": "Run (ms)",
+    "collected_at": "Collected at (UTC)",
+    "max_event_time": "Latest event (UTC)",
+    "lag_messages": "Consumer lag (messages)",
+    "rows": "Batch rows",
+    "checked_at": "Checked at (UTC)",
+    "duplicates": "Duplicate keys",
+}
 
 
 class ProvisionError(RuntimeError):
@@ -114,6 +146,7 @@ def _base_params(
         "viz_type": viz_type,
         "time_range": time_range,
         "row_limit": 10000,
+        "color_scheme": "supersetColors",
     }
 
 
@@ -127,10 +160,26 @@ def timeseries_params(
     groupby: list[str] | None = None,
     time_grain_sqla: str | None = None,
     y_axis_format: str | None = None,
+    x_axis_title: str | None = None,
+    y_axis_title: str | None = None,
+    x_axis_time_format: str = "%H:%M",
 ) -> dict[str, Any]:
     params = _base_params(dataset_id, viz_type)
     params["x_axis"] = x_axis
     params["metrics"] = metrics
+    # Labels and legend: without these the chart is a wall of anonymous lines
+    # (the original complaint). Keep them explicit rather than relying on
+    # control-panel defaults.
+    params["x_axis_time_format"] = x_axis_time_format
+    params["show_legend"] = True
+    params["legendType"] = "scroll"
+    params["legendOrientation"] = "top"
+    params["rich_tooltip"] = True
+    params["tooltipTimeFormat"] = "%Y-%m-%d %H:%M"
+    if x_axis_title:
+        params["x_axis_title"] = x_axis_title
+    if y_axis_title:
+        params["y_axis_title"] = y_axis_title
     if filters:
         params["adhoc_filters"] = filters
     if groupby:
@@ -151,6 +200,8 @@ def table_params(
     params["orderby"] = [[order_by, False]]
     params["row_limit"] = row_limit
     params["server_pagination"] = True
+    params["table_timestamp_format"] = "%Y-%m-%d %H:%M"
+    params["show_cell_bars"] = True
     return params
 
 
@@ -164,6 +215,9 @@ class ChartSpec:
     dataset: str
     params: dict[str, Any]
     wide: bool = False  # tables span a full row
+    x_axis_title: str = "Time (UTC)"
+    y_axis_title: str = ""
+    x_axis_time_format: str = "%H:%M"
 
 
 def chart_specs(symbols: list[str]) -> list[ChartSpec]:
@@ -189,6 +243,8 @@ def chart_specs(symbols: list[str]) -> list[ChartSpec]:
             tab=TAB_MARKET,
             viz_type="echarts_timeseries_line",
             dataset=GOLD_TABLE,
+            x_axis_title="Time (UTC)",
+            y_axis_title="Price (USDT)",
             params={
                 "x_axis": "candle_start",
                 "time_grain_sqla": "PT1M",
@@ -202,6 +258,8 @@ def chart_specs(symbols: list[str]) -> list[ChartSpec]:
             tab=TAB_MARKET,
             viz_type="echarts_timeseries_bar",
             dataset=GOLD_TABLE,
+            x_axis_title="Time (UTC)",
+            y_axis_title="Volume (base asset)",
             params={
                 "x_axis": "candle_start",
                 "time_grain_sqla": "PT1M",
@@ -215,6 +273,8 @@ def chart_specs(symbols: list[str]) -> list[ChartSpec]:
             tab=TAB_MARKET,
             viz_type="echarts_timeseries_bar",
             dataset=GOLD_TABLE,
+            x_axis_title="Time (UTC)",
+            y_axis_title="Notional (USD)",
             params={
                 "x_axis": "candle_start",
                 "time_grain_sqla": "PT1M",
@@ -228,6 +288,8 @@ def chart_specs(symbols: list[str]) -> list[ChartSpec]:
             tab=TAB_MARKET,
             viz_type="echarts_timeseries_line",
             dataset=GOLD_TABLE,
+            x_axis_title="Time (UTC)",
+            y_axis_title="Trades per minute",
             params={
                 "x_axis": "candle_start",
                 "time_grain_sqla": "PT1M",
@@ -241,6 +303,8 @@ def chart_specs(symbols: list[str]) -> list[ChartSpec]:
             tab=TAB_MARKET,
             viz_type="echarts_timeseries_line",
             dataset=GOLD_TABLE,
+            x_axis_title="Time (UTC)",
+            y_axis_title="Volatility (log-return stddev)",
             params={
                 "x_axis": "candle_start",
                 "time_grain_sqla": "PT1M",
@@ -296,16 +360,29 @@ def chart_specs(symbols: list[str]) -> list[ChartSpec]:
             },
         ),
         ChartSpec(
-            name="Consumer lag + batch rows",
+            name="Consumer lag (messages)",
             tab=TAB_HEALTH,
             viz_type="echarts_timeseries_line",
             dataset=METRICS_TABLE,
+            x_axis_title="Time (UTC)",
+            y_axis_title="Consumer lag (messages)",
             params={
                 "x_axis": "collected_at",
-                "metrics": [
-                    adhoc_metric("lag_messages", "AVG"),
-                    adhoc_metric("rows", "AVG"),
-                ],
+                "metrics": [adhoc_metric("lag_messages", "AVG")],
+                "y_axis_format": ",.0f",
+            },
+        ),
+        ChartSpec(
+            name="Batch rows written",
+            tab=TAB_HEALTH,
+            viz_type="echarts_timeseries_line",
+            dataset=METRICS_TABLE,
+            x_axis_title="Time (UTC)",
+            y_axis_title="Rows per batch",
+            params={
+                "x_axis": "collected_at",
+                "metrics": [adhoc_metric("rows", "AVG")],
+                "y_axis_format": ",.0f",
             },
         ),
         ChartSpec(
@@ -331,6 +408,8 @@ def chart_specs(symbols: list[str]) -> list[ChartSpec]:
             tab=TAB_HEALTH,
             viz_type="echarts_timeseries_line",
             dataset=INTEGRITY_TABLE,
+            x_axis_title="Time (UTC)",
+            y_axis_title="Duplicate keys",
             params={
                 "x_axis": "checked_at",
                 "metrics": [adhoc_metric("duplicates", "MAX")],
@@ -374,7 +453,20 @@ def chart_params(spec: ChartSpec, dataset_id: int) -> dict[str, Any]:
         groupby=dimensions,
         time_grain_sqla=grain,
         y_axis_format=y_format,
+        x_axis_title=spec.x_axis_title,
+        y_axis_title=spec.y_axis_title or None,
+        x_axis_time_format=spec.x_axis_time_format,
     )
+
+
+def tab_key(title: str) -> str:
+    """Stable tab id derived from its title (native filters reference it).
+
+    Index-based ids (TAB-0, TAB-1) shift whenever a tab is inserted, which would
+    silently detach a filter's `tabsInScope`; a slug is stable across reordering.
+    """
+    slug = re.sub(r"[^0-9A-Za-z]+", "-", title).strip("-")
+    return f"TAB-{slug}"
 
 
 def dashboard_layout(
@@ -422,11 +514,11 @@ def dashboard_layout(
             }
             row_ids.append(row_id)
             row_index += 1
-        tab_key = f"TAB-{t_index}"
-        tab_keys.append(tab_key)
-        nodes[tab_key] = {
+        key = tab_key(title)
+        tab_keys.append(key)
+        nodes[key] = {
             "children": row_ids,
-            "id": tab_key,
+            "id": key,
             "meta": {"text": title},
             "type": "TAB",
         }
@@ -549,6 +641,38 @@ class Api:
         items = result.get("result", [])
         return [item for item in items if isinstance(item, dict)]
 
+    def label_columns(self, dataset_id: int, labels: dict[str, str]) -> None:
+        """Set human `verbose_name`s so tables/charts read properly.
+
+        The full column list is re-sent (with each column's existing ``is_dttm``
+        and ``type`` preserved) because the dataset PUT replaces ``columns``;
+        sending only the relabelled subset would drop the rest.
+        """
+        detail = self._request("GET", f"/api/v1/dataset/{dataset_id}")
+        result = detail.get("result", {}) if isinstance(detail, dict) else {}
+        columns = result.get("columns") or []
+        payload: list[dict[str, Any]] = []
+        for column in columns:
+            name = column.get("column_name")
+            if not name:
+                continue
+            item: dict[str, Any] = {
+                "column_name": name,
+                "verbose_name": labels.get(name, column.get("verbose_name")),
+                "is_dttm": bool(column.get("is_dttm")),
+            }
+            # Without the existing column `id`, the PUT tries to insert the
+            # column again and fails with "columns already exist".
+            if column.get("id") is not None:
+                item["id"] = column["id"]
+            if column.get("type") is not None:
+                item["type"] = column["type"]
+            payload.append(item)
+        if payload:
+            self._request(
+                "PUT", f"/api/v1/dataset/{dataset_id}", {"columns": payload}
+            )
+
     def _all_charts(self) -> list[dict[str, Any]]:
         result = self._request("GET", "/api/v1/chart/")
         items = result.get("result", [])
@@ -643,6 +767,8 @@ def main() -> None:
     dataset_ids = {
         table: api.ensure_dataset(db_id, schema, table) for table in DATASET_TABLES
     }
+    for dataset_id in dataset_ids.values():
+        api.label_columns(dataset_id, COLUMN_LABELS)
 
     placed: dict[str, list[tuple[int, str, bool]]] = {tab: [] for tab in TAB_ORDER}
     for spec in chart_specs(symbols):
