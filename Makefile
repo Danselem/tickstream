@@ -11,7 +11,7 @@ BACKEND_CONFIG := $(INFRA_DIR)/backend.hcl
 
 ALERT_EMAIL ?= budget-alerts@example.com
 
-.PHONY: help install up down logs restart lint format typecheck test quality dbt-build dbt-refresh maintenance compact superset infra-bootstrap infra-plan infra-apply
+.PHONY: help install up down logs restart lint format typecheck test quality dbt-build dbt-refresh maintenance compact dedup-bronze superset infra-bootstrap infra-plan infra-apply
 
 help: ## Show targets
 	@grep -E '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS=":.*?## "} {printf "  %-16s %s\n", $$1, $$2}'
@@ -62,6 +62,9 @@ maintenance: ## Run Athena OPTIMIZE + VACUUM on bronze/silver/gold (Phase 2+)
 TABLES ?= bronze_trades
 compact: ## Compact+clean Iceberg tables via Athena OPTIMIZE/VACUUM (bypasses quality gate)
 	$(UV) python -m pipeline.scheduler --once --maintenance-only --tables $(TABLES)
+
+dedup-bronze: ## One-time bronze dedup rewrite (stop consumers first; ADR-015)
+	$(UV) python -m pipeline.scheduler --dedup-bronze
 
 superset: ## Re-run dashboard provisioning against the running Superset (Phase 3+)
 	docker compose exec superset python /app/provision/provision.py

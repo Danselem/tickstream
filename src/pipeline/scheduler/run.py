@@ -14,6 +14,7 @@ from pipeline.common.logging import configure_logging, get_logger
 from pipeline.quality import run_quality
 from pipeline.scheduler.dbt_runner import run_dbt_build
 from pipeline.scheduler.maintenance import MAINTENANCE_TABLES, run_maintenance
+from pipeline.scheduler.repair import run_dedup
 
 logger = get_logger("scheduler")
 
@@ -42,6 +43,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--tables",
         default=",".join(MAINTENANCE_TABLES),
         help="comma-separated tables for --maintenance-only (default: all medallion tables)",
+    )
+    parser.add_argument(
+        "--dedup-bronze",
+        action="store_true",
+        help="one-time bronze dedup rewrite via Athena (stop consumers first)",
     )
     return parser.parse_args(argv)
 
@@ -86,6 +92,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     settings = get_settings()
     configure_logging(settings.log_level)
+    if args.dedup_bronze:
+        return 0 if run_dedup(settings).ok else 1
     if args.maintenance_only:
         tables = tuple(t.strip() for t in args.tables.split(",") if t.strip())
         return run_maintenance_only(settings, tables)
