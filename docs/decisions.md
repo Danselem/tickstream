@@ -114,7 +114,6 @@ Short records of each non-obvious choice: context, decision, consequence.
   steps (Brief §11). Verified via SQL Lab through Superset: live row counts.
 
 ## ADR-012 — Superset-on-Athena gotchas (config, drivers, IAM, catalog case)
-
 - Context: four independent failures, each with a misleading surface symptom:
   1. `SUPERSET_CONFIG` is a Python *module name*, not a file path, and the custom
      module *replaces* `superset.config` — so it must start with
@@ -137,3 +136,70 @@ Short records of each non-obvious choice: context, decision, consequence.
   re-pay the tuition. Prefer evidence over guessing: reproduce with the same
   principal, check CloudTrail, read the driver source in the image.
 - Consequence: dataset sync + SQL Lab verified working; dashboard shows live data.
+
+## ADR-013 — Bronze write path: pruned-scan merge, transient retry, S3 timeouts
+
+- Context: Oct 2026 incident after the 7-coin launch. Three stacked failures:
+  1. `table.upsert` does a Python-side full-table merge — O(table) per batch.
+     At 300k rows a 20k batch ground 20+ min at 100% CPU with zero progress,
+     while a ~1M backlog (4-day outage) plus fresh 7-coin inflow piled up.
+  2. Transient S3 socket timeouts (pyarrow ~3 s defaults vs degraded Docker
+     networking) crashed the consumer (5 restarts); each crash rebalanced the
+     group and reset progress — a crash/rebalance livelock committing ~1 row
+     per 45 s. Batches slower than `max.poll.interval.ms` (5 min) rebalanced
+     even without crashing.
+  3. `max.poll.interval.ms` default (5 min) is shorter than any retry storm.
+- Decision:
+  - `upsert_events` = scan only the batch's partition scope (day range ×
+    symbols; manifest pruning), Arrow/Python anti-join on (symbol, trade_id),
+    append only new rows, skip the commit entirely on full replays. Same
+    guarantee (bronze duplicate-free, replay-safe), minutes → ~1 min/batch.
+    Within-batch duplicate keys collapse to one row.
+  - `common/retry.py` (tenacity): OSError (incl. pyarrow S3 timeouts),
+    retryable botocore codes/5xx, PyIceberg CommitFailed; 8 attempts exp
+    backoff. Bronze writes + table bootstrap retry; metrics append is
+    best-effort (never breaks the data path).
+  - `s3.connect-timeout=15 s` / `s3.request-timeout=60 s` via Settings (env),
+    generous-but-bounded; harmless on healthy networks.
+  - `max.poll.interval.ms=600000`: a single-consumer group never benefits from
+    rebalance, and retry storms must fit inside the poll window.
+- Consequence: first merged batch: 20k scanned, 2 appended, 19,998 skipped
+  (stale backlog already in bronze — the overlap prediction held). Backlog
+  drains ~20k/batch; fresh symbols land during the drain (partitions drain in
+  parallel). Commit changed files + tests, not mechanism guarantees.
+
+## ADR-014 — Consumer scale-out to 3 replicas + batching-window fix
+
+- Context: after the 7-coin launch the single consumer could not keep up
+  (~330–660 rows/s vs 7 streams), so the backlog grew. Diagnosis found three
+  independent problems, only one of them capacity:
+  1. **Batching-window bug (the real stall).** `TradeBatcher.drain()` reset the
+     time window at the *start* of the flush. Once a flush (write + commit +
+     metrics append) ran longer than `batch_interval_s` (45 s), the next window
+     was already expired, so every following batch flushed the instant a single
+     message arrived — a self-perpetuating 1-row batch every ~40 s, offsets
+     advancing by 1. It looked like a network/lib stuck state but was pure
+     control flow, and it reproduced on all three replicas.
+  2. **librdkafka stuck state after churn.** 228 restarts (from the Oct 2026
+     DNS/clock incident) left a consumer polling ~nothing until a clean
+     restart. librdkafka itself was healthy (direct probe: 544 msgs/20 s).
+  3. **Capacity.** One consumer over 3 partitions cannot match 7-coin ingest.
+- Decision:
+  - `drain()` no longer touches the timer; `start_window(now)` is called by the
+    consumer **after** the write+commit, so a slow flush cannot leave the next
+    window expired. Regression test in `test_batcher.py`.
+  - Run **3 consumer replicas** (one per `trades.raw` partition) in the same
+    `bronze-writer` group, via `--scale consumer=3` in the Makefile; the
+    `container_name` was dropped so Compose can manage `tickstream-consumer-N`.
+    Because the topic is keyed by symbol, each symbol owns exactly one partition
+    and one replica — parallel writes never touch the same `(symbol, trade_id)`,
+    and PyIceberg's optimistic-commit retry absorbs the metadata contention.
+  - Raise the producer keepalive (`ws_ping_timeout_s=60`) to match Binance's
+    20 s-ping / 1 min-pong contract (docs verified) and log `ws_throughput`.
+- Consequence: offsets advance 20k/batch per partition again; lag drains
+  ~1,300 rows/s with production ~25 rows/s. `max.poll.interval.ms=600000`
+  (ADR-013) still holds; its "single-consumer group" rationale is superseded
+  for scaling but kept for the poll-window bound. Caveat: a partition whose
+  lag is much larger (partition 0 carried the historical XRP backlog) drains
+  slower until the imbalance evens out — a rebalance after catch-up would
+  re-spread the symbols.

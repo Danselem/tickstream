@@ -1801,6 +1801,7 @@ dependencies = [
     { name = "pydantic-settings" },
     { name = "pyiceberg", extra = ["glue", "pandas", "pyiceberg-core", "s3fs", "sql-sqlite"] },
     { name = "structlog" },
+    { name = "tenacity" },
     { name = "websockets" },
 ]
 
@@ -1826,6 +1827,7 @@ requires-dist = [
     { name = "pydantic-settings", specifier = ">=2.5" },
     { name = "pyiceberg", extras = ["glue", "s3fs", "pandas", "sql-sqlite", "pyiceberg-core"], specifier = ">=0.9" },
     { name = "structlog", specifier = ">=25.1" },
+    { name = "tenacity", specifier = ">=9.1.4" },
     { name = "websockets", specifier = ">=15" },
 ]
 

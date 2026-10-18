@@ -11,7 +11,7 @@ BACKEND_CONFIG := $(INFRA_DIR)/backend.hcl
 
 ALERT_EMAIL ?= budget-alerts@example.com
 
-.PHONY: help install up down logs restart lint format typecheck test quality dbt-build maintenance superset infra-bootstrap infra-plan infra-apply
+.PHONY: help install up down logs restart lint format typecheck test quality dbt-build dbt-refresh maintenance compact superset infra-bootstrap infra-plan infra-apply
 
 help: ## Show targets
 	@grep -E '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS=":.*?## "} {printf "  %-16s %s\n", $$1, $$2}'
@@ -20,7 +20,7 @@ install: ## Install Python deps with uv (writes uv.lock)
 	uv sync
 
 up: ## Start all local services (Phase 1+)
-	docker compose up -d --build
+	docker compose up -d --build --scale consumer=3
 
 down: ## Stop all local services
 	docker compose down
@@ -29,7 +29,7 @@ logs: ## Tail all service logs
 	docker compose logs -f
 
 restart: ## Rebuild and restart all services
-	docker compose up -d --build --force-recreate
+	docker compose up -d --build --force-recreate --scale consumer=3
 
 lint: ## Ruff lint
 	$(UV) ruff check .
@@ -51,10 +51,17 @@ quality: ## Run Great Expectations checks once (Phase 2+)
 dbt-build: ## Run dbt deps + build (Phase 2+; scheduler runs this only after GE passes)
 	bash -c 'set -a; [ -f .env ] && source .env; set +a; $(UV) dbt deps --project-dir dbt --profiles-dir dbt && $(UV) dbt build --project-dir dbt --profiles-dir dbt'
 
+dbt-refresh: ## dbt deps + full-refresh build (one-off: reconcile late-arriving bronze rows)
+	bash -c 'set -a; [ -f .env ] && source .env; set +a; $(UV) dbt deps --project-dir dbt --profiles-dir dbt && $(UV) dbt build --project-dir dbt --profiles-dir dbt --full-refresh'
+
 # --quality-only skips dbt (this target only compacts); --maintenance runs after
 # a passing quality check. The scheduler loop itself calls run_once() with dbt.
 maintenance: ## Run Athena OPTIMIZE + VACUUM on bronze/silver/gold (Phase 2+)
 	$(UV) python -m pipeline.scheduler --once --quality-only --maintenance
+
+TABLES ?= bronze_trades
+compact: ## Compact+clean Iceberg tables via Athena OPTIMIZE/VACUUM (bypasses quality gate)
+	$(UV) python -m pipeline.scheduler --once --maintenance-only --tables $(TABLES)
 
 superset: ## Re-run dashboard provisioning against the running Superset (Phase 3+)
 	docker compose exec superset python /app/provision/provision.py

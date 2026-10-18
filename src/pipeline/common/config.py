@@ -13,6 +13,10 @@ class Settings(BaseSettings):
     s3_bucket: str = "tickstream-lake"
     glue_database: str = "tickstream"
     catalog_type: str = "glue"  # "glue" in prod, "sql" for offline pytest
+    # PyIceberg S3 timeouts (s). Defaults raised after Oct 2026 incident: the
+    # stock ~3 s timeouts turned Docker-network degradation into a crash loop.
+    s3_connect_timeout_s: float = 15.0
+    s3_request_timeout_s: float = 60.0
 
     # Kafka
     kafka_bootstrap: str = "localhost:9092"
@@ -22,6 +26,10 @@ class Settings(BaseSettings):
     # Source
     symbols: list[str] = ["XRPUSDT"]
     binance_ws_url: str = "wss://data-stream.binance.vision"
+    # Websocket keepalive (s). ping_timeout raised after Oct 2026: the 20 s default
+    # tripped "keepalive ping timeout" (close 1011) on Docker-network hiccups.
+    ws_ping_interval_s: int = 20
+    ws_ping_timeout_s: int = 60
 
     # Batching / scheduling
     batch_interval_s: int = 45

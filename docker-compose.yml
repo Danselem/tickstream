@@ -46,8 +46,11 @@ services:
 
   consumer:
     build: .
-    container_name: tickstream-consumer
+    # No container_name: scaling needs Compose-managed names (tickstream-consumer-N).
+    # One replica per trades.raw partition (3) in the same group — see ADR-014.
     command: ["python", "-m", "pipeline.consumer"]
+    deploy:
+      replicas: 3
     env_file: [".env"]
     environment:
       TICKSTREAM_KAFKA_BOOTSTRAP: kafka:19092

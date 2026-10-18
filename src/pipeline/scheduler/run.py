@@ -13,13 +13,14 @@ from pipeline.common.config import Settings, get_settings
 from pipeline.common.logging import configure_logging, get_logger
 from pipeline.quality import run_quality
 from pipeline.scheduler.dbt_runner import run_dbt_build
-from pipeline.scheduler.maintenance import run_maintenance
+from pipeline.scheduler.maintenance import MAINTENANCE_TABLES, run_maintenance
 
 logger = get_logger("scheduler")
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
-    """CLI: --once (single cycle), --quality-only (skip dbt), --maintenance."""
+    """CLI: --once (single cycle), --quality-only (skip dbt), --maintenance,
+    --maintenance-only (OPTIMIZE/VACUUM only, bypassing the quality gate)."""
     parser = argparse.ArgumentParser(
         description="tickstream scheduler: quality -> dbt -> maintenance"
     )
@@ -32,7 +33,23 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="also run OPTIMIZE + VACUUM after a passing dbt build",
     )
+    parser.add_argument(
+        "--maintenance-only",
+        action="store_true",
+        help="run OPTIMIZE + VACUUM and exit, bypassing quality and dbt",
+    )
+    parser.add_argument(
+        "--tables",
+        default=",".join(MAINTENANCE_TABLES),
+        help="comma-separated tables for --maintenance-only (default: all medallion tables)",
+    )
     return parser.parse_args(argv)
+
+
+def run_maintenance_only(settings: Settings, tables: Sequence[str]) -> int:
+    """Compact/clean the given tables without the quality gate. 0 on all-ok, 1 otherwise."""
+    outcomes = run_maintenance(settings, tables=tables)
+    return 0 if all(outcome.ok for outcome in outcomes) else 1
 
 
 def run_once(
@@ -69,6 +86,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     settings = get_settings()
     configure_logging(settings.log_level)
+    if args.maintenance_only:
+        tables = tuple(t.strip() for t in args.tables.split(",") if t.strip())
+        return run_maintenance_only(settings, tables)
     if args.once:
         return run_once(
             settings,

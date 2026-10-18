@@ -1,12 +1,15 @@
 """Binance trade-stream WebSocket client with reconnect + backoff.
 
 Uses the combined-stream endpoint so all configured symbols ride one connection.
-Server ping/pong is handled by the `websockets` library.
+Server ping/pong is handled by the `websockets` library; we run our own keepalive
+with a generous timeout (config `ws_ping_timeout_s`) so transient network stalls
+do not force a reconnect (Oct 2026: the 20 s default tripped close 1011 repeatedly).
 """
 
 import asyncio
 import json
 import random
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -18,6 +21,9 @@ from pipeline.common.logging import get_logger
 logger = get_logger("producer.ws")
 
 MAX_BACKOFF_S = 30.0
+OPEN_TIMEOUT_S = 30.0
+CLOSE_TIMEOUT_S = 10.0
+THROUGHPUT_WINDOW_S = 30.0
 
 
 def stream_url(settings: Settings) -> str:
@@ -34,16 +40,36 @@ async def stream_trades(
     """Connect, invoke `on_message` per trade payload, reconnect forever until `stop`."""
     url = stream_url(settings)
     backoff_s = 1.0
+    total = 0
     while not stop.is_set():
         try:
-            async with connect(url, ping_interval=20, ping_timeout=20) as ws:
+            async with connect(
+                url,
+                ping_interval=settings.ws_ping_interval_s,
+                ping_timeout=settings.ws_ping_timeout_s,
+                open_timeout=OPEN_TIMEOUT_S,
+                close_timeout=CLOSE_TIMEOUT_S,
+            ) as ws:
                 logger.info("ws_connected", url=url, symbols=settings.symbols)
                 backoff_s = 1.0
+                window = 0
+                window_start = time.monotonic()
                 async for raw in ws:
                     if stop.is_set():
                         return
                     payload: dict[str, Any] = json.loads(raw)
                     on_message(payload.get("data", payload))
+                    total += 1
+                    window += 1
+                    now = time.monotonic()
+                    if now - window_start >= THROUGHPUT_WINDOW_S:
+                        logger.info(
+                            "ws_throughput",
+                            rate_per_s=round(window / (now - window_start), 1),
+                            total=total,
+                        )
+                        window = 0
+                        window_start = now
         except Exception as exc:  # noqa: BLE001 — every failure mode must reconnect
             delay = backoff_s + random.uniform(0, 1)  # noqa: S311 — jitter, not crypto
             logger.warning("ws_disconnected", error=str(exc), retry_in_s=round(delay, 1))

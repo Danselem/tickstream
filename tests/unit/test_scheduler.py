@@ -140,3 +140,54 @@ def test_parse_args_flags() -> None:
     assert args.maintenance is True
     args = parse_args([])
     assert args.once is False
+
+
+def test_parse_args_maintenance_only_and_tables() -> None:
+    args = parse_args(["--once", "--maintenance-only", "--tables", "bronze_trades"])
+    assert args.maintenance_only is True
+    assert args.tables == "bronze_trades"
+    assert parse_args([]).maintenance_only is False
+    # default tables is all medallion tables
+    assert set(parse_args([]).tables.split(",")) == {
+        "bronze_trades",
+        "silver_trades",
+        "gold_candles_1m",
+    }
+
+
+def test_maintenance_only_bypasses_quality_and_dbt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    def fake_quality(settings: Settings) -> QualityResult:
+        calls.append("quality")
+        return _ok_result()
+
+    def fake_dbt() -> int:
+        calls.append("dbt")
+        return 0
+
+    def fake_maintenance(settings: Settings, tables: object = ()) -> list[object]:
+        calls.append(f"maintenance:{tables}")
+        return []
+
+    monkeypatch.setattr(run_module, "run_quality", fake_quality)
+    monkeypatch.setattr(run_module, "run_dbt_build", fake_dbt)
+    monkeypatch.setattr(run_module, "run_maintenance", fake_maintenance)
+
+    assert run_module.run_maintenance_only(_settings(), ("bronze_trades",)) == 0
+    assert calls == ["maintenance:('bronze_trades',)"]
+
+
+def test_maintenance_only_returns_one_on_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pipeline.scheduler.maintenance import MaintenanceOutcome
+
+    def fake_maintenance(settings: Settings, tables: object = ()) -> list[object]:
+        return [MaintenanceOutcome("bronze_trades", "VACUUM", ok=False, error="boom")]
+
+    monkeypatch.setattr(run_module, "run_maintenance", fake_maintenance)
+    assert run_module.run_maintenance_only(_settings(), ("bronze_trades",)) == 1
+

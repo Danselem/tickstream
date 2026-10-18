@@ -46,6 +46,22 @@ def test_drain_of_empty_window_returns_empty() -> None:
     assert TradeBatcher(max_rows=10, interval_s=60).drain() == []
 
 
+def test_window_starts_after_flush_not_drain() -> None:
+    """Regression (Oct 2026): a flush slower than the interval must not leave the
+    next window already expired, which flushed every following batch at 1 row."""
+    batcher = TradeBatcher(max_rows=10_000, interval_s=45)
+    batcher.start_window(0.0)
+    batcher.add(_event(1))
+    assert batcher.should_flush(45.0)  # first window elapsed
+    batcher.drain()  # simulate a slow write; window must NOT reset here
+
+    # The caller restarts the window only after the flush completes (at t=85).
+    batcher.start_window(85.0)
+    batcher.add(_event(2))
+    assert not batcher.should_flush(86.0)  # fresh window: 1 s is not enough
+    assert batcher.should_flush(130.0)  # a full interval later
+
+
 def test_rejects_invalid_config() -> None:
     with pytest.raises(ValueError, match="max_rows"):
         TradeBatcher(max_rows=0, interval_s=60)

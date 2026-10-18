@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from pyiceberg.table import Table, UpsertResult
+from pyiceberg.table import Table
 
 from pipeline.common.config import Settings
 from pipeline.common.iceberg import (
@@ -13,6 +13,7 @@ from pipeline.common.iceberg import (
 )
 from pipeline.common.logging import get_logger
 from pipeline.common.models import TradeEvent
+from pipeline.common.retry import with_transient_retry
 
 logger = get_logger("consumer.writer")
 
@@ -32,15 +33,18 @@ class BronzeWriter:
         )
         logger.info("bronze_ready", table=f"{settings.glue_database}.{BRONZE_TABLE}")
 
-    def write(self, events: list[TradeEvent]) -> UpsertResult:
-        """Upsert a non-empty batch. Raises on failure — caller must not commit offsets."""
+    def write(self, events: list[TradeEvent]) -> int:
+        """Append the batch's new rows (partition-scoped anti-join inside).
+
+        Transient S3/Glue/commit failures are retried with backoff; a hard
+        failure raises and the caller must not commit offsets (replay appends
+        nothing new). Returns rows appended."""
         if not events:
             raise ValueError("refusing to write an empty batch")
-        result = upsert_events(self._table, events)
-        logger.info(
-            "bronze_write",
-            rows=len(events),
-            inserted=result.rows_inserted,
-            updated=result.rows_updated,
+        appended = with_transient_retry(
+            lambda: upsert_events(self._table, events), action="bronze_write"
         )
-        return result
+        logger.info(
+            "bronze_write", rows=len(events), appended=appended, skipped=len(events) - appended
+        )
+        return appended

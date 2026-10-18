@@ -29,11 +29,16 @@ class TradeBatcher:
         return bool(self._events) and now - self._window_start >= self._interval_s
 
     def drain(self) -> list[TradeEvent]:
-        """Take the current window and restart the timer. Empty drain returns []."""
+        """Take the current window. Does NOT restart the timer — the caller calls
+        `start_window` *after* the write/commit so a slow flush cannot leave the
+        next window already expired (that caused 1-row batches; Oct 2026)."""
         batch = self._events
         self._events = []
-        self._window_start = time.monotonic()
         return batch
+
+    def start_window(self, now: float) -> None:
+        """Begin timing a fresh batch window. Call once a flush has completed."""
+        self._window_start = now
 
     def __len__(self) -> int:
         return len(self._events)

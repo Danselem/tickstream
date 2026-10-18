@@ -70,12 +70,30 @@ def test_replay_does_not_duplicate_rows(tmp_path: Path) -> None:
     catalog, settings = _catalog(tmp_path)
     writer = BronzeWriter(settings, tmp_path)
     events = [_event(trade_id) for trade_id in range(5)]
-    writer.write(events)
-    writer.write(events)  # replay of the same micro-batch
+    assert writer.write(events) == 5
+    assert writer.write(events) == 0  # replay appends nothing (no empty commit)
     table = catalog.load_table(f"{NAMESPACE}.{BRONZE_TABLE}")
     rows = table.scan().to_arrow()
     assert rows.num_rows == 5
     assert sorted(r["trade_id"] for r in rows.to_pylist()) == [0, 1, 2, 3, 4]
+
+
+def test_partial_overlap_appends_only_new_rows(tmp_path: Path) -> None:
+    catalog, settings = _catalog(tmp_path)
+    writer = BronzeWriter(settings, tmp_path)
+    assert writer.write([_event(trade_id) for trade_id in range(5)]) == 5
+    assert writer.write([_event(trade_id) for trade_id in range(3, 8)]) == 3
+    table = catalog.load_table(f"{NAMESPACE}.{BRONZE_TABLE}")
+    assert table.scan().to_arrow().num_rows == 8
+
+
+def test_within_batch_duplicates_written_once(tmp_path: Path) -> None:
+    catalog, settings = _catalog(tmp_path)
+    writer = BronzeWriter(settings, tmp_path)
+    events = [_event(1), _event(2), _event(1)]  # same key twice in one batch
+    assert writer.write(events) == 2
+    table = catalog.load_table(f"{NAMESPACE}.{BRONZE_TABLE}")
+    assert table.scan().to_arrow().num_rows == 2
 
 
 def test_writer_rejects_empty_batch(tmp_path: Path) -> None:

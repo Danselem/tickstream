@@ -6,13 +6,19 @@ from pipeline.common.config import Settings
 
 
 def build_consumer(settings: Settings) -> Consumer:
-    """At-least-once consumer: no auto-commit, earliest on first start."""
+    """At-least-once consumer: no auto-commit, earliest on first start.
+
+    max.poll.interval.ms is 10 min (not the 5 min default): a single-consumer
+    group never benefits from rebalance, and big backlog batches + S3 retry
+    storms must fit inside the poll window or the group thrashes (Oct 2026).
+    """
     return Consumer(
         {
             "bootstrap.servers": settings.kafka_bootstrap,
             "group.id": settings.consumer_group,
             "enable.auto.commit": False,
             "auto.offset.reset": "earliest",
+            "max.poll.interval.ms": 600_000,
             "client.id": "tickstream-consumer",
         }
     )
