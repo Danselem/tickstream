@@ -3,6 +3,8 @@
 import signal
 import time
 
+from confluent_kafka import Consumer, TopicPartition
+
 from pipeline.common.config import get_settings
 from pipeline.common.logging import configure_logging, get_logger
 from pipeline.common.models import BatchReport, TradeEvent
@@ -26,18 +28,13 @@ def main() -> None:
     )
     ops = with_transient_retry(lambda: OpsWriter(settings), action="ops_ensure")
     consumer = build_consumer(settings)
-    consumer.subscribe([settings.topic])
     batcher = TradeBatcher(settings.batch_max_rows, float(settings.batch_interval_s))
-    logger.info("consumer_started", topic=settings.topic, group=settings.consumer_group)
 
     running = True
 
     def _stop(_signum: int, _frame: object) -> None:
         nonlocal running
         running = False
-
-    signal.signal(signal.SIGTERM, _stop)
-    signal.signal(signal.SIGINT, _stop)
 
     def _flush() -> None:
         batch = batcher.drain()
@@ -67,6 +64,19 @@ def main() -> None:
         except Exception as exc:  # noqa: BLE001 — observability is best-effort
             logger.warning("metrics_append_failed", error=str(exc))
         logger.info("batch_committed", **report.model_dump(mode="json"))
+
+    def _on_revoke(_consumer: Consumer, partitions: list[TopicPartition]) -> None:
+        # Commit the in-flight window before the new owner takes these partitions
+        # so it replays as little as possible (ADR-015). _flush is idempotent:
+        # with an already-empty buffer it is a no-op.
+        logger.info("partitions_revoked", partitions=[p.partition for p in partitions])
+        _flush()
+
+    consumer.subscribe([settings.topic], on_revoke=_on_revoke)
+    logger.info("consumer_started", topic=settings.topic, group=settings.consumer_group)
+
+    signal.signal(signal.SIGTERM, _stop)
+    signal.signal(signal.SIGINT, _stop)
 
     while running:
         message = consumer.poll(1.0)

@@ -165,6 +165,12 @@ def upsert_events(table: Table, events: list[TradeEvent]) -> int:
     Same guarantee as before: bronze holds no duplicate (symbol, trade_id).
     """
     batch = events_to_arrow(events)
+    # Each consumer replica caches its own Table handle and only sees its OWN
+    # appends in place. Refresh first so this writer also sees rows committed by
+    # the other replicas: on a rebalance the new partition owner replays a batch
+    # the old owner already wrote, and without this refresh the anti-join misses
+    # those rows and appends duplicate (symbol, trade_id) (ADR-015).
+    table = table.refresh()
     symbols = pc.unique(batch.column("symbol")).to_pylist()
     lo = pc.min(batch.column("event_time")).as_py()
     hi = pc.max(batch.column("event_time")).as_py()

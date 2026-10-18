@@ -60,13 +60,31 @@ provisioning against the live container (idempotent).
   (ADR-009). If a MERGE ever times out again, suspect lookback size first.
 - **GX failing.** Read `quality/reports/<latest>.json`: `failed_expectations`
   names the check. Freshness failures after downtime heal once fresh data lands.
-  A failed run does NOT advance the scan window.
+  A failed run does NOT advance the scan window. If it's
+  `expect_column_values_to_be_unique` on bronze `unique_key`, see the dedup
+  procedure below (cross-replica duplication, ADR-015).
 - **Superset 500s on dataset sync.** Almost always IAM (`athena:GetTableMetadata`
   / `ListDatabases` datacatalog-scoped) or `catalog_name` case — see ADR-012.
   Server traceback: `docker logs tickstream-superset | grep -A15 datasets/api.py`.
 - **Superset login fails after rebuild.** Metadata DB lives on the
   `superset-home` volume; admin persists. If the volume was deleted, bootstrap
   recreates the admin from `.env`.
+
+## Bronze dedup procedure (one-time, ADR-015)
+
+Only needed if bronze holds duplicate `(symbol, trade_id)` — normally caught by
+the GX uniqueness gate after a rebalance with stale replica handles.
+
+1. Confirm the damage first (0 expected):
+   `SELECT count(*) c, count(DISTINCT symbol||'#'||CAST(trade_id AS varchar)) d
+   FROM bronze_trades` — if `c > d`, there are duplicates.
+2. Stop the writers (the rewrite must not race appends):
+   `docker compose stop consumer`.
+3. `make dedup-bronze` — PyIceberg rewrite keeping the first row per key
+   (`scan -> dedup -> table.overwrite`; Athena can't express this). Minutes.
+4. `make up` (`--scale consumer=3`) to restart the fixed image.
+5. Re-check: `c == d`, then `make quality` (uniqueness gate green) and
+   `make dbt-build`.
 
 ## Backlog drain procedure (after long outages)
 

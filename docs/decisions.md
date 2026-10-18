@@ -199,7 +199,44 @@ Short records of each non-obvious choice: context, decision, consequence.
 - Consequence: offsets advance 20k/batch per partition again; lag drains
   ~1,300 rows/s with production ~25 rows/s. `max.poll.interval.ms=600000`
   (ADR-013) still holds; its "single-consumer group" rationale is superseded
-  for scaling but kept for the poll-window bound. Caveat: a partition whose
-  lag is much larger (partition 0 carried the historical XRP backlog) drains
-  slower until the imbalance evens out — a rebalance after catch-up would
-  re-spread the symbols.
+   for scaling but kept for the poll-window bound. Caveat: a partition whose
+     lag is much larger (partition 0 carried the historical XRP backlog) drains
+     slower until the imbalance evens out — a rebalance after catch-up would
+     re-spread the symbols.
+
+## ADR-015 — Cross-replica duplication on rebalance; refresh-before-scan + revoke commit
+
+- Context: after scaling to 3 replicas (ADR-014) and restarting the group, bronze
+  gained **15,825 duplicate `(symbol, trade_id)` keys** — otherwise identical
+  rows — clustered at the restart. `total − distinct ≈ 15,825`, `max rows per
+  key = 2`. The GX bronze suite (`expect_column_values_to_be_unique` on
+  `unique_key`) would therefore fail and block dbt.
+- Root cause (reproduced offline with two `Table` handles on the SQL catalog):
+  each consumer process caches its own `Table` object and only sees **its own**
+  appends reflected in that object. On a rebalance the new partition owner
+  replays a batch the old owner already wrote, but its cached metadata predates
+  that write, so the partition-scoped anti-join (ADR-013) finds nothing and
+  **appends the rows again**. Kafka's at-least-once delivery plus a stale local
+  snapshot — not a merge bug — produced the duplicates.
+- Decision:
+  - `upsert_events` calls `table.refresh()` **before** the anti-join scan so a
+    replica sees every replica's committed rows. Regression test
+    `test_cross_replica_replay_does_not_duplicate_rows` (two writers, one stale).
+  - Harden the trigger: `partition.assignment.strategy=cooperative-sticky` and an
+    `on_revoke` handler that flushes + commits the in-flight window before the
+    new owner takes the partitions, so replays are rare and small.
+  - Repair the existing damage once with `make dedup-bronze`, run with the
+    consumers stopped. Crafted as an in-process PyIceberg rewrite
+    (`scan -> keep earliest row per key -> table.overwrite`), **not** Athena SQL:
+    Athena engine v3 is Trino-based and has no `INSERT OVERWRITE` (only
+    `INSERT INTO` / `MERGE` / `DELETE`), and neither MERGE nor DELETE can remove
+    one of two *identical* rows. This is the single sanctioned exception to
+    "bronze is raw and never modified"; it restores the no-duplicate invariant
+    the GX gate depends on.
+- Consequence: the anti-join is now correct across replicas as long as no two
+  consumers write the same key in the same instant. That last window is closed
+  by single-owner-per-partition + commit-on-revoke; a truly concurrent
+  double-write would still require Iceberg row-level MERGE, which we avoid
+  because PyIceberg's partitioned upsert is buggy (#3758). Residual duplicates
+  are caught by the GX uniqueness gate rather than silently accumulating.
+

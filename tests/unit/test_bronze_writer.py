@@ -101,3 +101,20 @@ def test_writer_rejects_empty_batch(tmp_path: Path) -> None:
     writer = BronzeWriter(settings, tmp_path)
     with pytest.raises(ValueError, match="empty batch"):
         writer.write([])
+
+
+def test_cross_replica_replay_does_not_duplicate_rows(tmp_path: Path) -> None:
+    """A second replica's cached handle must see the first replica's commits.
+
+    Reproduces the Oct 2026 duplication bug: with 3 consumer replicas, a batch
+    replayed after a rebalance was re-appended because the replaying replica's
+    cached Table metadata predated the original write (ADR-015)."""
+    catalog, settings = _catalog(tmp_path)
+    replica_a = BronzeWriter(settings, tmp_path)
+    replica_b = BronzeWriter(settings, tmp_path)  # handle loaded before A writes
+    events = [_event(trade_id) for trade_id in range(5)]
+    assert replica_a.write(events) == 5
+    assert replica_b.write(events) == 0  # replay appends nothing
+    table = catalog.load_table(f"{NAMESPACE}.{BRONZE_TABLE}")
+    assert table.scan().to_arrow().num_rows == 5
+
