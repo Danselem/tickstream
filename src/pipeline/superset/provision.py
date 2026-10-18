@@ -435,11 +435,9 @@ class Api:
             "published": True,
         }
         if existing:
-            self._request(
-                "PUT",
-                f"/api/v1/dashboard/{existing['id']}",
-                {**payload, "charts": [chart_id for chart_id, _ in charts]},
-            )
+            # Linkage is derived from position_json (as on create); the dashboard
+            # PUT schema rejects an explicit `charts` field (Superset 4.x).
+            self._request("PUT", f"/api/v1/dashboard/{existing['id']}", payload)
             return int(existing["id"])
         created = self._request("POST", "/api/v1/dashboard/", payload)
         return int(created["id"])

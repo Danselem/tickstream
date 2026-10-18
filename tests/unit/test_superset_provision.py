@@ -203,6 +203,20 @@ def test_ensure_chart_and_dashboard_create_path() -> None:
     assert dash_post[2]["published"] is True
 
 
+def test_ensure_dashboard_update_omits_charts_field() -> None:
+    """Superset's dashboard PUT schema rejects `charts`; position_json links them."""
+    api, transport = _api_with(
+        {
+            ("GET", "/api/v1/dashboard/"): {"result": [{"id": 21}]},
+            ("PUT", "/api/v1/dashboard/21"): {"id": 21},
+        },
+    )
+    assert api.ensure_dashboard([(11, "c"), (12, "d")]) == 21
+    put = next(call for call in transport.calls if call[0] == "PUT")
+    assert "charts" not in put[2]
+    assert "position_json" in put[2] and put[2]["published"] is True
+
+
 def test_login_sets_bearer_token() -> None:
     api, _transport = _api_with(
         {
