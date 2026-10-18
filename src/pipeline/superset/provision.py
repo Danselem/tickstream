@@ -20,11 +20,28 @@ from typing import Any
 
 DATABASE_NAME = "tickstream_athena"
 GOLD_TABLE = "gold_candles_1m"
+DAILY_SUMMARY_TABLE = "gold_market_summary_daily"
+HOURLY_SUMMARY_TABLE = "gold_market_summary_hourly"
 QUALITY_TABLE = "quality_results"
 METRICS_TABLE = "pipeline_metrics"
 INTEGRITY_TABLE = "integrity_results"
 DASHBOARD_SLUG = "tickstream"
 DASHBOARD_TITLE = "Tickstream — crypto pipeline"
+
+# Dashboard tabs (order preserved in the layout).
+TAB_MARKET = "Market"
+TAB_HEALTH = "Pipeline health"
+TAB_ORDER = (TAB_MARKET, TAB_HEALTH)
+
+# Chart specs feed the dataset ids in this order.
+DATASET_TABLES = (
+    GOLD_TABLE,
+    DAILY_SUMMARY_TABLE,
+    HOURLY_SUMMARY_TABLE,
+    QUALITY_TABLE,
+    METRICS_TABLE,
+    INTEGRITY_TABLE,
+)
 
 TIME_RANGE = "Last day"
 
@@ -139,17 +156,21 @@ def table_params(
 
 @dataclass(frozen=True)
 class ChartSpec:
-    """One dashboard chart: stable name + viz + params builder arguments."""
+    """One dashboard chart: stable name + tab + viz + params builder arguments."""
 
     name: str
+    tab: str
     viz_type: str
-    dataset: str  # GOLD_TABLE | QUALITY_TABLE | METRICS_TABLE
+    dataset: str
     params: dict[str, Any]
+    wide: bool = False  # tables span a full row
 
 
 def chart_specs(symbols: list[str]) -> list[ChartSpec]:
-    """The five Brief §7 charts. One symbol → symbol-filtered charts; several
-    → one line per symbol via groupby (no chart sprawl as coins are added)."""
+    """Business "Market" tab + engineering "Pipeline health" tab.
+
+    One symbol → symbol-filtered market charts; several → one line per symbol via
+    groupby (no chart sprawl as coins are added)."""
     if len(symbols) == 1:
         coin: list[dict[str, Any]] = [adhoc_equals("symbol", symbols[0])]
         groupby: list[str] | None = None
@@ -158,48 +179,125 @@ def chart_specs(symbols: list[str]) -> list[ChartSpec]:
         coin = []
         groupby = ["symbol"]
         prefix = ""
+    view = {
+        "filters": coin,
+        "groupby": groupby,
+    }
     return [
         ChartSpec(
             name=f"{prefix}price — close vs VWAP (1m)",
+            tab=TAB_MARKET,
             viz_type="echarts_timeseries_line",
             dataset=GOLD_TABLE,
             params={
                 "x_axis": "candle_start",
                 "time_grain_sqla": "PT1M",
                 "metrics": [adhoc_metric("close", "AVG"), adhoc_metric("vwap", "AVG")],
-                "filters": coin,
-                "groupby": groupby,
                 "y_axis_format": ",.4f",
+                **view,
             },
         ),
         ChartSpec(
-            name=f"{prefix}volume (1m)",
+            name=f"{prefix}base volume (1m)",
+            tab=TAB_MARKET,
             viz_type="echarts_timeseries_bar",
             dataset=GOLD_TABLE,
             params={
                 "x_axis": "candle_start",
                 "time_grain_sqla": "PT1M",
                 "metrics": [adhoc_metric("volume", "SUM")],
-                "filters": coin,
-                "groupby": groupby,
                 "y_axis_format": ",.0f",
+                **view,
+            },
+        ),
+        ChartSpec(
+            name=f"{prefix}USD notional traded (1m)",
+            tab=TAB_MARKET,
+            viz_type="echarts_timeseries_bar",
+            dataset=GOLD_TABLE,
+            params={
+                "x_axis": "candle_start",
+                "time_grain_sqla": "PT1M",
+                "metrics": [adhoc_metric("notional", "SUM")],
+                "y_axis_format": "$,.0f",
+                **view,
+            },
+        ),
+        ChartSpec(
+            name=f"{prefix}trades per minute (1m)",
+            tab=TAB_MARKET,
+            viz_type="echarts_timeseries_line",
+            dataset=GOLD_TABLE,
+            params={
+                "x_axis": "candle_start",
+                "time_grain_sqla": "PT1M",
+                "metrics": [adhoc_metric("trade_count", "SUM")],
+                "y_axis_format": ",.0f",
+                **view,
             },
         ),
         ChartSpec(
             name=f"{prefix}volatility (1m log-return stddev)",
+            tab=TAB_MARKET,
             viz_type="echarts_timeseries_line",
             dataset=GOLD_TABLE,
             params={
                 "x_axis": "candle_start",
                 "time_grain_sqla": "PT1M",
                 "metrics": [adhoc_metric("volatility", "AVG")],
-                "filters": coin,
-                "groupby": groupby,
                 "y_axis_format": ".2e",
+                **view,
+            },
+        ),
+        ChartSpec(
+            name="Market summary — today (UTC)",
+            tab=TAB_MARKET,
+            viz_type="table",
+            dataset=DAILY_SUMMARY_TABLE,
+            wide=True,
+            params={
+                "columns": [
+                    "symbol",
+                    "window_start",
+                    "open",
+                    "close",
+                    "change_pct",
+                    "high",
+                    "low",
+                    "notional",
+                    "trade_count",
+                    "trades_per_min",
+                ],
+                "order_by": "window_start",
+                "row_limit": 50,
+            },
+        ),
+        ChartSpec(
+            name="Market summary — hourly",
+            tab=TAB_MARKET,
+            viz_type="table",
+            dataset=HOURLY_SUMMARY_TABLE,
+            wide=True,
+            params={
+                "columns": [
+                    "symbol",
+                    "window_start",
+                    "open",
+                    "close",
+                    "change_pct",
+                    "high",
+                    "low",
+                    "notional",
+                    "trade_count",
+                    "trades_per_min",
+                ],
+                "order_by": "window_start",
+                "row_limit": 50,
             },
         ),
         ChartSpec(
             name="Consumer lag + batch rows",
+            tab=TAB_HEALTH,
             viz_type="echarts_timeseries_line",
             dataset=METRICS_TABLE,
             params={
@@ -212,6 +310,7 @@ def chart_specs(symbols: list[str]) -> list[ChartSpec]:
         ),
         ChartSpec(
             name="Pipeline health — recent quality runs",
+            tab=TAB_HEALTH,
             viz_type="table",
             dataset=QUALITY_TABLE,
             params={
@@ -229,6 +328,7 @@ def chart_specs(symbols: list[str]) -> list[ChartSpec]:
         ),
         ChartSpec(
             name="Bronze integrity — duplicate keys over time",
+            tab=TAB_HEALTH,
             viz_type="echarts_timeseries_line",
             dataset=INTEGRITY_TABLE,
             params={
@@ -277,42 +377,72 @@ def chart_params(spec: ChartSpec, dataset_id: int) -> dict[str, Any]:
     )
 
 
-def dashboard_layout(charts: list[tuple[int, str]]) -> dict[str, Any]:
-    """Two-charts-per-row grid. Nodes key off numeric chart id (unique by
-    construction); the frontend links layout to slices via ``meta.chartId``."""
+def dashboard_layout(
+    tabs: list[tuple[str, list[tuple[int, str, bool]]]],
+) -> dict[str, Any]:
+    """Native-tab layout: ``ROOT -> TABS -> TAB(text) -> ROW -> CHART``.
+
+    Each tab is ``(title, [(chart_id, name, wide), ...])``. Wide charts (tables)
+    span their own full-width row; others pack two per row. Nodes key off the
+    numeric chart id; the frontend links layout to slices via ``meta.chartId``."""
     nodes: dict[str, Any] = {}
-    row_ids: list[str] = []
-    for i in range(0, len(charts), 2):
-        row_id = f"ROW-{i // 2}"
-        children: list[str] = []
-        for chart_id, name in charts[i : i + 2]:
-            key = f"CHART-{chart_id}"
-            children.append(key)
-            nodes[key] = {
-                "children": [],
-                "id": key,
-                "meta": {
-                    "chartId": chart_id,
-                    "height": 50,
-                    "sliceName": {"value": name},
-                    "width": 6,
-                },
-                "type": "CHART",
+    tab_keys: list[str] = []
+    for t_index, (title, charts) in enumerate(tabs):
+        row_ids: list[str] = []
+        row_index = 0
+        cursor = 0
+        while cursor < len(charts):
+            if charts[cursor][2]:  # wide table: one per row
+                group = charts[cursor : cursor + 1]
+                cursor += 1
+            else:
+                group = charts[cursor : cursor + 2]
+                cursor += 2
+            row_id = f"ROW-{t_index}-{row_index}"
+            children: list[str] = []
+            for chart_id, name, wide in group:
+                key = f"CHART-{chart_id}"
+                children.append(key)
+                nodes[key] = {
+                    "children": [],
+                    "id": key,
+                    "meta": {
+                        "chartId": chart_id,
+                        "height": 50,
+                        "sliceName": {"value": name},
+                        "width": 12 if wide else 6,
+                    },
+                    "type": "CHART",
+                }
+            nodes[row_id] = {
+                "children": children,
+                "id": row_id,
+                "meta": {"background": "BACKGROUND_TRANSPARENT"},
+                "type": "ROW",
             }
-        nodes[row_id] = {
-            "children": children,
-            "id": row_id,
-            "meta": {"background": "BACKGROUND_TRANSPARENT"},
-            "type": "ROW",
+            row_ids.append(row_id)
+            row_index += 1
+        tab_key = f"TAB-{t_index}"
+        tab_keys.append(tab_key)
+        nodes[tab_key] = {
+            "children": row_ids,
+            "id": tab_key,
+            "meta": {"text": title},
+            "type": "TAB",
         }
-        row_ids.append(row_id)
-    nodes["GRID_ID"] = {"children": row_ids, "id": "GRID_ID", "type": "GRID"}
+    nodes["TABS-main"] = {
+        "children": tab_keys,
+        "id": "TABS-main",
+        "meta": {},
+        "type": "TABS",
+    }
+    nodes["GRID_ID"] = {"children": [], "id": "GRID_ID", "type": "GRID"}
     nodes["HEADER_ID"] = {
         "id": "HEADER_ID",
         "meta": {"text": DASHBOARD_TITLE},
         "type": "HEADER",
     }
-    nodes["ROOT_ID"] = {"children": ["GRID_ID"], "id": "ROOT_ID", "type": "ROOT"}
+    nodes["ROOT_ID"] = {"children": ["TABS-main"], "id": "ROOT_ID", "type": "ROOT"}
     nodes["DASHBOARD_VERSION_KEY"] = "v2"
     return nodes
 
@@ -451,8 +581,10 @@ class Api:
         created = self._request("POST", "/api/v1/chart/", payload)
         return int(created["id"])
 
-    def ensure_dashboard(self, charts: list[tuple[int, str]]) -> int:
-        layout = dashboard_layout(charts)
+    def ensure_dashboard(
+        self, tabs: list[tuple[str, list[tuple[int, str, bool]]]]
+    ) -> int:
+        layout = dashboard_layout(tabs)
         existing = self._find("dashboard", "slug", DASHBOARD_SLUG)
         payload = {
             "dashboard_title": DASHBOARD_TITLE,
@@ -509,19 +641,19 @@ def main() -> None:
     db_id = api.ensure_database(DATABASE_NAME, uri)
     schema = _env("TICKSTREAM_GLUE_DATABASE")
     dataset_ids = {
-        table: api.ensure_dataset(db_id, schema, table)
-        for table in (GOLD_TABLE, QUALITY_TABLE, METRICS_TABLE, INTEGRITY_TABLE)
+        table: api.ensure_dataset(db_id, schema, table) for table in DATASET_TABLES
     }
 
-    charts: list[tuple[int, str]] = []
+    placed: dict[str, list[tuple[int, str, bool]]] = {tab: [] for tab in TAB_ORDER}
     for spec in chart_specs(symbols):
         dataset_id = dataset_ids[spec.dataset]
         params = chart_params(spec, dataset_id)
         chart_id = api.ensure_chart(spec.name, spec.viz_type, dataset_id, params)
-        charts.append((chart_id, spec.name))
+        placed[spec.tab].append((chart_id, spec.name, spec.wide))
         print(f"chart ready: {spec.name} (id={chart_id})", flush=True)
 
-    dashboard_id = api.ensure_dashboard(charts)
+    tabs = [(tab, placed[tab]) for tab in TAB_ORDER if placed[tab]]
+    dashboard_id = api.ensure_dashboard(tabs)
     print(
         f"provisioned database={db_id} datasets={dataset_ids} "
         f"dashboard={dashboard_id} at {base_url}/superset/dashboard/{DASHBOARD_SLUG}/",

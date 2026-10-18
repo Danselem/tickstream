@@ -198,6 +198,8 @@ def test_parse_args_maintenance_only_and_tables() -> None:
         "bronze_trades",
         "silver_trades",
         "gold_candles_1m",
+        "gold_market_summary_daily",
+        "gold_market_summary_hourly",
     }
 
 

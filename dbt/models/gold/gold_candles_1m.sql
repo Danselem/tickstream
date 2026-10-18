@@ -4,7 +4,7 @@
   config(
     unique_key=["symbol", "candle_start"],
     partitioned_by=["DAY(candle_start)", "symbol"],
-    update_condition="(target.open IS DISTINCT FROM src.open OR target.high IS DISTINCT FROM src.high OR target.low IS DISTINCT FROM src.low OR target.close IS DISTINCT FROM src.close OR target.volume IS DISTINCT FROM src.volume OR target.vwap IS DISTINCT FROM src.vwap OR target.trade_count IS DISTINCT FROM src.trade_count OR target.volatility IS DISTINCT FROM src.volatility)",
+    update_condition="(target.open IS DISTINCT FROM src.open OR target.high IS DISTINCT FROM src.high OR target.low IS DISTINCT FROM src.low OR target.close IS DISTINCT FROM src.close OR target.volume IS DISTINCT FROM src.volume OR target.notional IS DISTINCT FROM src.notional OR target.vwap IS DISTINCT FROM src.vwap OR target.trade_count IS DISTINCT FROM src.trade_count OR target.volatility IS DISTINCT FROM src.volatility)",
   )
 }}
 
@@ -56,6 +56,7 @@ select
     min(price) as low,
     max(case when rn_close = 1 then price end) as close,
     sum(quantity) as volume,
+    sum(price * quantity) as notional,
     sum(price * quantity) / nullif(sum(quantity), 0) as vwap,
     count(*) as trade_count,
     stddev_samp(log_return) as volatility

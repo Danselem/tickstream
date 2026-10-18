@@ -47,8 +47,11 @@ Delivery is at-least-once; processing is idempotent. Bronze merges on
 (ADR-013; the naive `table.upsert` proved O(table) per batch). Kafka offsets
 commit only after the Iceberg write; transient S3/Glue failures retry with
 backoff (tenacity), metrics appends are best-effort. Silver re-dedupes as
-defense-in-depth; gold builds 1-min OHLC + volume + VWAP + trade count +
-log-return volatility. All timestamps UTC (event time + ingest time kept).
+defense-in-depth; gold builds 1-min OHLC + base volume + USD notional + VWAP +
+trade count + log-return volatility, plus per-symbol daily/hourly market
+summaries (open/close, range, % change, trades/min). All timestamps UTC (event
+time + ingest time kept). The Superset dashboard has two tabs — **Market**
+(business) and **Pipeline health** (ops).
 
 ## Repo map
 
@@ -73,7 +76,8 @@ docs/       architecture, decisions (16 ADRs), cost (with actuals), runbook
 - Second dbt build merges new keys only (silver 0 dupes, gold candles stable).
 - 20k-row stale replay batch: 2 appended, 19,998 skipped (overlap absorbed).
 - Maintenance: bronze 348 → 4 files, 0 dupes; one-time dedup removed 15.8k rows.
-- Dashboard: SQL Lab through Superset returns live Athena rows.
+- Dashboard: SQL Lab through Superset returns live Athena rows; Market +
+  Pipeline health tabs render (10 charts).
 
 ## Cost (Oct 1–15 actuals)
 

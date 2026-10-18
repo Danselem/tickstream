@@ -43,16 +43,20 @@ flowchart LR
    (ADR-016): a local scan of the key columns only, `duplicates = rows −
    distinct_keys`, recorded in `tickstream.integrity_results`; any duplicate
    blocks dbt.
-5. **Models.** dbt on Athena engine v3: `stg_trades` view → `silver_trades`
-   (dedup `row_number()`, 2 h lookback, `update_condition` so identical rows
-   skip rewrites) → `gold_candles_1m` (OHLC/volume/VWAP/trade_count/volatility,
-   30-min recompute). 30+ tests, all columns documented.
-6. **Serve.** Superset 6 (derived image + `pyathena[pandas]`, SQLite metadata on
-   a volume) provisioned by a REST script: Athena database, 3 datasets
-   (gold + 2 ops tables, never bronze), 5 charts (price/volume/volatility per
-   symbol via groupby, lag, health table), one published dashboard.
-7. **Maintain.** Every N scheduler cycles (and via `make maintenance`): Athena
-   `OPTIMIZE … REWRITE DATA USING BIN_PACK` + `VACUUM` on bronze/silver/gold.
+ 5. **Models.** dbt on Athena engine v3: `stg_trades` view → `silver_trades`
+    (dedup `row_number()`, 2 h lookback, `update_condition` so identical rows
+    skip rewrites) → `gold_candles_1m` (OHLC/volume/USD-notional/VWAP/trade_count/
+    volatility, 30-min recompute) → `gold_market_summary_daily`/`_hourly`
+    (per-symbol open/close/range/notional/%change from a shared macro). 40+ tests,
+    all columns documented.
+ 6. **Serve.** Superset 6 (derived image + `pyathena[pandas]`, SQLite metadata on
+    a volume) provisioned by a REST script: Athena database, 6 datasets
+    (gold + 2 business summaries + 3 ops tables, never bronze), 10 charts across
+    two native tabs — **Market** (price/VWAP, base volume, USD notional, trades/min,
+    volatility, daily & hourly summary tables) and **Pipeline health** (lag,
+    quality runs, bronze integrity) — one published dashboard.
+ 7. **Maintain.** Every N scheduler cycles (and via `make maintenance`): Athena
+    `OPTIMIZE … REWRITE DATA USING BIN_PACK` + `VACUUM` on the Iceberg tables.
 
 ## Delivery semantics
 

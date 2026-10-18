@@ -45,6 +45,12 @@ models:
           - not_null
           - dbt_utils.expression_is_true:
               expression: "> 0"
+      - name: notional
+        description: "Summed USD notional traded (sum(price*quantity))."
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: ">= 0"
       - name: vwap
         description: "Volume-weighted average price (sum(price*qty)/sum(qty))."
         tests:
@@ -59,3 +65,117 @@ models:
               expression: ">= 1"
       - name: volatility
         description: "Sample stddev of per-trade log returns within the minute. NULL for single-trade candles."
+
+  - name: gold_market_summary_daily
+    description: "Business summary per symbol per UTC day: open/close, high/low range, USD notional, volume, trade count, trades/min and % change. Incremental MERGE on (symbol, window_start) with a 2-day trailing recompute."
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns:
+            - symbol
+            - window_start
+      - dbt_utils.expression_is_true:
+          expression: "high >= low"
+    columns:
+      - name: symbol
+        description: "Trading pair."
+        tests:
+          - not_null
+      - name: window_start
+        description: "Day bucket start, UTC."
+        tests:
+          - not_null
+      - name: open
+        description: "First trade price of the day."
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: "> 0"
+      - name: close
+        description: "Last trade price of the day."
+        tests:
+          - not_null
+      - name: high
+        description: "Highest trade price of the day."
+        tests:
+          - not_null
+      - name: low
+        description: "Lowest trade price of the day."
+        tests:
+          - not_null
+      - name: notional
+        description: "USD notional traded over the day."
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: ">= 0"
+      - name: volume
+        description: "Base-asset quantity traded over the day."
+        tests:
+          - not_null
+      - name: trade_count
+        description: "Number of trades over the day."
+        tests:
+          - not_null
+      - name: trades_per_min
+        description: "Average trades per minute (sum of trade_count over minutes present)."
+        tests:
+          - not_null
+      - name: change_pct
+        description: "Day % change: (close - open) / open."
+
+  - name: gold_market_summary_hourly
+    description: "Business summary per symbol per UTC hour. Same measures as the daily summary at hour grain; incremental MERGE with a 2-hour trailing recompute."
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns:
+            - symbol
+            - window_start
+      - dbt_utils.expression_is_true:
+          expression: "high >= low"
+    columns:
+      - name: symbol
+        description: "Trading pair."
+        tests:
+          - not_null
+      - name: window_start
+        description: "Hour bucket start, UTC."
+        tests:
+          - not_null
+      - name: open
+        description: "First trade price of the hour."
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: "> 0"
+      - name: close
+        description: "Last trade price of the hour."
+        tests:
+          - not_null
+      - name: high
+        description: "Highest trade price of the hour."
+        tests:
+          - not_null
+      - name: low
+        description: "Lowest trade price of the hour."
+        tests:
+          - not_null
+      - name: notional
+        description: "USD notional traded over the hour."
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: ">= 0"
+      - name: volume
+        description: "Base-asset quantity traded over the hour."
+        tests:
+          - not_null
+      - name: trade_count
+        description: "Number of trades over the hour."
+        tests:
+          - not_null
+      - name: trades_per_min
+        description: "Average trades per minute (sum of trade_count over minutes present)."
+        tests:
+          - not_null
+      - name: change_pct
+        description: "Hour % change: (close - open) / open."

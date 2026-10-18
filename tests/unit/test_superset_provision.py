@@ -51,21 +51,27 @@ def test_adhoc_builders_shape() -> None:
     )
 
 
-def test_chart_specs_cover_brief_panels() -> None:
+def test_chart_specs_cover_both_tabs() -> None:
     specs = chart_specs(["XRPUSDT"])
-    assert len(specs) == 6
+    assert len(specs) == 10
+    assert {spec.tab for spec in specs} == {provision.TAB_MARKET, provision.TAB_HEALTH}
     assert {spec.dataset for spec in specs} == {
         provision.GOLD_TABLE,
+        provision.DAILY_SUMMARY_TABLE,
+        provision.HOURLY_SUMMARY_TABLE,
         provision.QUALITY_TABLE,
         provision.METRICS_TABLE,
         provision.INTEGRITY_TABLE,
     }
-    scoped = [
-        "XRPUSDT" in spec.name
-        or any(word in spec.name.lower() for word in ("health", "lag", "integrity"))
-        for spec in specs
+    # Market tab is business-facing; pipeline health tab is the ops view.
+    market = [spec for spec in specs if spec.tab == provision.TAB_MARKET]
+    health = [spec for spec in specs if spec.tab == provision.TAB_HEALTH]
+    assert len(market) == 7 and len(health) == 3
+    # Summary tables span a full row.
+    assert [spec.name for spec in market if spec.wide] == [
+        "Market summary — today (UTC)",
+        "Market summary — hourly",
     ]
-    assert all(scoped)
 
 
 def test_chart_specs_single_symbol_filters() -> None:
@@ -78,9 +84,9 @@ def test_chart_specs_single_symbol_filters() -> None:
 
 def test_chart_specs_multi_symbol_groups_by_symbol() -> None:
     specs = chart_specs(["BTCUSDT", "ETHUSDT"])
-    assert len(specs) == 6
+    assert len(specs) == 10
     coin_specs = [spec for spec in specs if spec.dataset == provision.GOLD_TABLE]
-    assert len(coin_specs) == 3
+    assert len(coin_specs) == 5
     for spec in coin_specs:
         params = chart_params(spec, 9)
         assert params["groupby"] == ["symbol"]
@@ -92,15 +98,14 @@ def test_chart_specs_multi_symbol_groups_by_symbol() -> None:
 
 
 def test_chart_params_renders_table_and_timeseries() -> None:
-    specs = {spec.viz_type: spec for spec in chart_specs(["XRPUSDT"])}
-    table = chart_params(specs["table"], 7)
+    specs = chart_specs(["XRPUSDT"])
+    quality = next(spec for spec in specs if spec.dataset == provision.QUALITY_TABLE)
+    table = chart_params(quality, 7)
     assert table["datasource"] == "7__table"
     assert table["query_mode"] == "raw"
     assert "check_at" in table["columns"]
 
-    line_spec = next(
-        spec for spec in chart_specs(["XRPUSDT"]) if spec.name.endswith("(1m)")
-    )
+    line_spec = next(spec for spec in specs if spec.dataset == provision.GOLD_TABLE)
     line = chart_params(line_spec, 9)
     assert line["datasource"] == "9__table"
     assert line["x_axis"] == "candle_start"
@@ -108,19 +113,23 @@ def test_chart_params_renders_table_and_timeseries() -> None:
     assert line["adhoc_filters"][0]["comparator"] == "XRPUSDT"
 
 
-def test_dashboard_layout_two_per_row_with_chart_ids() -> None:
-    charts = [(11, "a"), (12, "b"), (13, "c"), (14, "d"), (15, "e")]
-    layout = dashboard_layout(charts)
-    rows = [layout[f"ROW-{i}"] for i in range(3)]
-    assert [len(row["children"]) for row in rows] == [2, 2, 1]
-    assert layout["GRID_ID"]["children"] == ["ROW-0", "ROW-1", "ROW-2"]
-    assert layout["ROOT_ID"]["children"] == ["GRID_ID"]
-    chart_ids = {
-        node["meta"]["chartId"]
-        for key, node in layout.items()
-        if key.startswith("CHART-")
-    }
-    assert chart_ids == {11, 12, 13, 14, 15}
+def test_dashboard_layout_builds_tabs_and_wide_rows() -> None:
+    layout = dashboard_layout(
+        [
+            ("Market", [(1, "a", False), (2, "b", False), (3, "big", True)]),
+            ("Pipeline health", [(4, "c", False), (5, "d", False)]),
+        ]
+    )
+    assert layout["ROOT_ID"]["children"] == ["TABS-main"]
+    assert layout["TABS-main"]["children"] == ["TAB-0", "TAB-1"]
+    assert layout["TAB-0"]["meta"]["text"] == "Market"
+    assert layout["TAB-1"]["children"] == ["ROW-1-0"]
+    assert layout["TAB-0"]["children"] == ["ROW-0-0", "ROW-0-1"]
+    assert layout["ROW-0-0"]["children"] == ["CHART-1", "CHART-2"]
+    assert layout["ROW-0-1"]["children"] == ["CHART-3"]
+    assert layout["CHART-1"]["meta"]["width"] == 6
+    assert layout["CHART-3"]["meta"]["width"] == 12
+    assert layout["GRID_ID"]["children"] == []
 
 
 class FakeResponse:
@@ -196,7 +205,7 @@ def test_ensure_chart_and_dashboard_create_path() -> None:
     )
     chart_id = api.ensure_chart("c", "table", 7, {"a": 1})
     assert chart_id == 11
-    assert api.ensure_dashboard([(11, "c")]) == 21
+    assert api.ensure_dashboard([("Market", [(11, "c", False)])]) == 21
     posts = [call for call in transport.calls if call[0] == "POST"]
     chart_post = next(call for call in posts if call[1].endswith("/api/v1/chart/"))
     assert json.loads(chart_post[2]["params"]) == {"a": 1}
@@ -235,7 +244,7 @@ def test_ensure_dashboard_update_omits_charts_field() -> None:
             ("PUT", "/api/v1/dashboard/21"): {"id": 21},
         },
     )
-    assert api.ensure_dashboard([(11, "c"), (12, "d")]) == 21
+    assert api.ensure_dashboard([("Market", [(11, "c", False), (12, "d", False)])]) == 21
     put = next(call for call in transport.calls if call[0] == "PUT")
     assert "charts" not in put[2]
     assert "position_json" in put[2] and put[2]["published"] is True

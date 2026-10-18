@@ -285,4 +285,27 @@ Short records of each non-obvious choice: context, decision, consequence.
   10 min; a duplicate could persist up to one maintenance interval before the
   run blocks. `integrity_results` also plots duplicate-rate over time in Superset.
 
+## ADR-017 — Business gold summary + tabbed dashboard (two audiences)
+
+- Context: the dashboard was an engineering/operations view (lag, quality,
+  integrity) plus raw market candles, with no business metrics. A manager needs
+  USD notional, price range, % change and trades/min; an on-call engineer needs
+  the ingestion/quality signals. Mixing both on one grid served neither.
+- Decision: put the business math in the **gold layer** and split the dashboard.
+  - `gold_candles_1m` gains `notional = sum(price*quantity)` (= `vwap × volume`).
+  - New `gold_market_summary_daily` / `_hourly` (one shared macro
+    `market_summary(grain, lookback)`): per `(symbol, window_start)` open/close,
+    high/low, notional, volume, trade_count, trades_per_min,
+    `change_pct = (close-open)/open`. Incremental MERGE with a trailing
+    recompute (2 days / 2 hours) so late trades self-correct.
+  - Two native Superset tabs on one dashboard: **Market** (business) and
+    **Pipeline health** (ops), built as `ROOT → TABS → TAB → ROW → CHART`.
+- Consequence: each audience gets a clean view; aggregation logic lives in dbt
+  (tested, one source of truth), Superset stays declarative. `%change` cannot be
+  a Superset SIMPLE metric (no first/last aggregate), which is why a summary
+  model — not a chart-layer calc — is the implementation. Adding `notional` to
+  an existing Iceberg table needs a one-off `make dbt-refresh` (no
+  `on_schema_change`), and the two summary tables join the OPTIMIZE/VACUUM list.
+
+
 

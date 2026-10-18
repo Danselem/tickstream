@@ -16,13 +16,23 @@ def test_build_statements_optimize_then_vacuum_per_table() -> None:
         ("silver_trades", "VACUUM tickstream.silver_trades"),
         ("gold_candles_1m", "OPTIMIZE tickstream.gold_candles_1m REWRITE DATA USING BIN_PACK"),
         ("gold_candles_1m", "VACUUM tickstream.gold_candles_1m"),
+        (
+            "gold_market_summary_daily",
+            "OPTIMIZE tickstream.gold_market_summary_daily REWRITE DATA USING BIN_PACK",
+        ),
+        ("gold_market_summary_daily", "VACUUM tickstream.gold_market_summary_daily"),
+        (
+            "gold_market_summary_hourly",
+            "OPTIMIZE tickstream.gold_market_summary_hourly REWRITE DATA USING BIN_PACK",
+        ),
+        ("gold_market_summary_hourly", "VACUUM tickstream.gold_market_summary_hourly"),
     ]
 
 
 def test_run_maintenance_all_ok() -> None:
     executed: list[str] = []
     outcomes = run_maintenance(_settings(), executor=executed.append)
-    assert len(outcomes) == 6
+    assert len(outcomes) == 10
     assert all(outcome.ok and outcome.error is None for outcome in outcomes)
     assert executed == [sql for _, sql in build_statements("testdb")]
 
@@ -33,5 +43,5 @@ def test_run_maintenance_isolates_failures() -> None:
             raise RuntimeError("boom")
 
     outcomes = run_maintenance(_settings(), executor=flaky)
-    assert [outcome.ok for outcome in outcomes] == [True, False] * 3
+    assert [outcome.ok for outcome in outcomes] == [True, False] * 5
     assert all("boom" in (outcome.error or "") for outcome in outcomes if not outcome.ok)

@@ -16,7 +16,13 @@ logger = get_logger("scheduler.maintenance")
 # Provisioned by infra/athena.tf; engine AUTO tracks v3 (MERGE/OPTIMIZE/VACUUM).
 WORKGROUP = "tickstream-pipeline"
 
-MAINTENANCE_TABLES = ("bronze_trades", "silver_trades", "gold_candles_1m")
+MAINTENANCE_TABLES = (
+    "bronze_trades",
+    "silver_trades",
+    "gold_candles_1m",
+    "gold_market_summary_daily",
+    "gold_market_summary_hourly",
+)
 
 StatementExecutor = Callable[[str], None]
 

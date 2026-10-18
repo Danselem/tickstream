@@ -9,10 +9,13 @@ scheduler loop + OPTIMIZE/VACUUM live. Phase 3a (Superset dashboard) built and v
 write path rewritten to a pruned-scan merge (ADR-013), consumer scaled to 3 replicas and
 the batch-window stall fixed (ADR-014); a rebalance-duplication incident was fixed with
 refresh-before-scan + commit-on-revoke (ADR-015) and repaired once. Phase 4 (docs) done;
-Brief §11 definition-of-done fully checked. Deviations from this plan are recorded in
-docs/decisions.md (ADR-008 ops tables in `tickstream` DB, ADR-009 MERGE `update_condition`,
-ADR-010 `glue:GetTableVersions`, ADR-013 bronze merge, ADR-014 scale-out, ADR-015
-cross-replica idempotency, ADR-016 whole-table integrity check).
+Brief §11 definition-of-done fully checked. Post-phase pass: whole-table integrity check
+(ADR-016), Superset linkage fix (ADR-012a), and a business-facing gold summary +
+two-tab dashboard (ADR-017: Market + Pipeline health). Deviations from this plan are
+recorded in docs/decisions.md (ADR-008 ops tables in `tickstream` DB, ADR-009 MERGE
+`update_condition`, ADR-010 `glue:GetTableVersions`, ADR-012a dashboard slice linkage,
+ADR-013 bronze merge, ADR-014 scale-out, ADR-015 cross-replica idempotency, ADR-016
+whole-table integrity check, ADR-017 business summary + tabs).
 
 Locked user decisions: (1) bronze idempotency = upsert/MERGE on `(symbol, trade_id)`;
 (2) Great Expectations validates a local PyIceberg scan, not Athena; (3) OpenTofu state in
