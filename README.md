@@ -62,8 +62,8 @@ quality/suites/bronze_suite.json    GX suite snapshot (reports/ gitignored)
 superset/   image + config + bootstrap + REST provisioning (dashboard as code)
 infra/      OpenTofu: budget alert first, then bucket/Glue/Athena/IAM
 scheduler/  (in src) quality → dbt → maintenance loop
-tests/      pytest, 92 unit + integration (Kafka roundtrip, replay idempotency)
-docs/       architecture, decisions (20 ADRs), cost (with actuals), runbook
+tests/      pytest, 96 unit + integration (Kafka roundtrip, replay idempotency)
+docs/       architecture, decisions (22 ADRs), cost (with actuals), runbook
 ```
 
 ## Verification highlights
@@ -77,10 +77,11 @@ docs/       architecture, decisions (20 ADRs), cost (with actuals), runbook
 - 20k-row stale replay batch: 2 appended, 19,998 skipped (overlap absorbed).
 - Maintenance: bronze 348 → 4 files, 0 dupes; one-time dedup removed 15.8k rows.
 - Dashboard: SQL Lab through Superset returns live Athena rows; Market +
-  Pipeline health tabs render (15 charts: candlestick OHLC, close/VWAP, volume,
+  Pipeline health tabs render (17 charts: candlestick OHLC, close/VWAP, volume,
   notional, trades/min, volatility, notional-share treemap, KPI tiles, summary
-  tables) with native Symbol/Time filters, explicit axis titles/legends and human
-  column labels (ADR-018/020).
+  tables, and lake health — row counts per layer + per-symbol freshness) with
+  native Symbol/Time filters, trailing-window time ranges, explicit axis
+  titles/legends and human column labels (ADR-018/020/021/022).
 
 ## Cost (Oct 1–15 actuals)
 

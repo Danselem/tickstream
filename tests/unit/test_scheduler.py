@@ -94,6 +94,10 @@ def test_quality_only_with_maintenance_skips_dbt_but_compacts(
         calls.append("integrity")
         return _ok_integrity()
 
+    def fake_health(settings: Settings) -> tuple[list[object], list[object]]:
+        calls.append("health")
+        return [], []
+
     def fake_maintenance(settings: Settings) -> list[object]:
         calls.append("maintenance")
         return []
@@ -101,10 +105,11 @@ def test_quality_only_with_maintenance_skips_dbt_but_compacts(
     monkeypatch.setattr(run_module, "run_quality", fake_quality)
     monkeypatch.setattr(run_module, "run_dbt_build", fake_dbt)
     monkeypatch.setattr(run_module, "run_integrity", fake_integrity)
+    monkeypatch.setattr(run_module, "run_pipeline_health", fake_health)
     monkeypatch.setattr(run_module, "run_maintenance", fake_maintenance)
 
     assert run_once(_settings(), quality_only=True, with_maintenance=True) == 0
-    assert calls == ["integrity", "maintenance"]
+    assert calls == ["integrity", "health", "maintenance"]
 
 
 def test_pass_runs_dbt_then_maintenance(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -121,6 +126,10 @@ def test_pass_runs_dbt_then_maintenance(monkeypatch: pytest.MonkeyPatch) -> None
         calls.append("integrity")
         return _ok_integrity()
 
+    def fake_health(settings: Settings) -> tuple[list[object], list[object]]:
+        calls.append("health")
+        return [], []
+
     def fake_maintenance(settings: Settings) -> list[object]:
         calls.append("maintenance")
         return []
@@ -128,10 +137,11 @@ def test_pass_runs_dbt_then_maintenance(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setattr(run_module, "run_quality", fake_quality)
     monkeypatch.setattr(run_module, "run_dbt_build", fake_dbt)
     monkeypatch.setattr(run_module, "run_integrity", fake_integrity)
+    monkeypatch.setattr(run_module, "run_pipeline_health", fake_health)
     monkeypatch.setattr(run_module, "run_maintenance", fake_maintenance)
 
     assert run_once(_settings(), with_maintenance=True) == 0
-    assert calls == ["integrity", "dbt", "maintenance"]
+    assert calls == ["integrity", "health", "dbt", "maintenance"]
 
 
 def test_integrity_failure_blocks_dbt(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -172,6 +182,7 @@ def test_dbt_failure_propagates_without_maintenance(
 
     monkeypatch.setattr(run_module, "run_quality", fake_quality)
     monkeypatch.setattr(run_module, "run_integrity", fake_integrity)
+    monkeypatch.setattr(run_module, "run_pipeline_health", lambda settings: ([], []))
     monkeypatch.setattr(run_module, "run_dbt_build", lambda: 2)
     monkeypatch.setattr(run_module, "run_maintenance", fake_maintenance)
 
@@ -206,6 +217,11 @@ def test_parse_args_maintenance_only_and_tables() -> None:
 def test_parse_args_integrity_only() -> None:
     assert parse_args(["--integrity-only"]).integrity_only is True
     assert parse_args([]).integrity_only is False
+
+
+def test_parse_args_health_only() -> None:
+    assert parse_args(["--health-only"]).health_only is True
+    assert parse_args([]).health_only is False
 
 
 def test_maintenance_only_bypasses_quality_and_dbt(

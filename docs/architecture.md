@@ -11,7 +11,8 @@ flowchart LR
     GX -->|fail| BLOCK[block dbt<br/>report to quality_results]
     SCHED -.->|every N cycles| INT[whole-table integrity<br/>duplicate keys, local scan<br/>→ integrity_results]
     INT -->|duplicates>0| BLOCK
-    DBT --> SUP[Superset 6<br/>pyathena, REST-provisioned<br/>5 charts, published]
+    SCHED -.->|every N cycles| HLTH[lake health<br/>rows per layer + per-symbol<br/>freshness → layer_counts,<br/>symbol_freshness]
+    DBT --> SUP[Superset 6<br/>pyathena, REST-provisioned<br/>17 charts, published]
     S3 --> SUP
     DBT -.->|OPTIMIZE + VACUUM| S3
 ```
@@ -39,10 +40,11 @@ flowchart LR
    uniqueness, freshness ≤ 300 s, row count ≥ 1. JSON report to
    `quality/reports/` + row to `tickstream.quality_results`. Failure → nonzero
    exit → scheduler skips dbt (and doesn't advance the window). On the
-   maintenance cadence the scheduler also runs a **whole-table** integrity check
-   (ADR-016): a local scan of the key columns only, `duplicates = rows −
-   distinct_keys`, recorded in `tickstream.integrity_results`; any duplicate
-   blocks dbt.
+    maintenance cadence the scheduler also runs a **whole-table** integrity check
+    (ADR-016): a local scan of the key columns only, `duplicates = rows −
+    distinct_keys`, recorded in `tickstream.integrity_results`; any duplicate
+    blocks dbt. The same cycle appends **lake health** (ADR-021): per-layer row
+    counts + per-symbol freshness to `layer_counts` / `symbol_freshness`.
  5. **Models.** dbt on Athena engine v3: `stg_trades` view → `silver_trades`
     (dedup `row_number()`, 2 h lookback, `update_condition` so identical rows
     skip rewrites) → `gold_candles_1m` (OHLC/volume/USD-notional/VWAP/trade_count/
@@ -50,13 +52,15 @@ flowchart LR
      (per-symbol open/close/range/notional/%change from a shared macro) →
      `dim_symbol`/`dim_time` views (ADR-019). 60+ tests, all columns documented.
  6. **Serve.** Superset 6 (derived image + `pyathena[pandas]`, SQLite metadata on
-     a volume) provisioned by a REST script: Athena database, 6 datasets
-     (gold + 2 business summaries + 3 ops tables, never bronze), 15 charts across
-     two native tabs — **Market** (candlestick OHLC, price/VWAP, base volume, USD
-     notional, trades/min, volatility, notional-share treemap, 2 KPI tiles, daily
-     & hourly summary tables) and **Pipeline health** (lag, batch rows, quality
-     runs, bronze integrity). Native **Symbol** and **Time range** filters (ADR-020);
-     all charts/labels defined in code (ADR-018). One published dashboard.
+      a volume) provisioned by a REST script: Athena database, 8 datasets
+      (gold + 2 business summaries + 5 ops/health tables, never bronze), 17 charts
+      across two native tabs — **Market** (candlestick OHLC, price/VWAP, base
+      volume, USD notional, trades/min, volatility, notional-share treemap, 2 KPI
+      tiles, daily & hourly summary tables) and **Pipeline health** (lag, batch
+      rows, quality runs, bronze integrity, rows per layer, per-symbol freshness).
+      Native **Symbol** and **Time range** filters (ADR-020); trailing-window time
+      ranges (ADR-022); all charts/labels defined in code (ADR-018). One published
+      dashboard.
  7. **Maintain.** Every N scheduler cycles (and via `make maintenance`): Athena
     `OPTIMIZE … REWRITE DATA USING BIN_PACK` + `VACUUM` on the Iceberg tables.
 

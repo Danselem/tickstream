@@ -11,7 +11,11 @@ the batch-window stall fixed (ADR-014); a rebalance-duplication incident was fix
 refresh-before-scan + commit-on-revoke (ADR-015) and repaired once. Phase 4 (docs) done;
 Brief §11 definition-of-done fully checked. Post-phase pass: whole-table integrity check
 (ADR-016), Superset linkage fix (ADR-012a), and a business-facing gold summary +
-two-tab dashboard (ADR-017: Market + Pipeline health). Deviations from this plan are
+two-tab dashboard (ADR-017: Market + Pipeline health). BI polish pass (post-phase):
+explicit chart labels/legends/tab ids (ADR-018), dimension views (ADR-019), Market
+overview + native filters (ADR-020), lake-health metrics — rows per layer and
+per-symbol freshness (ADR-021), and trailing-window time ranges (ADR-022); 17 charts,
+96 tests. Deviations from this plan are
 recorded in docs/decisions.md (ADR-008 ops tables in `tickstream` DB, ADR-009 MERGE
 `update_condition`, ADR-010 `glue:GetTableVersions`, ADR-012a dashboard slice linkage,
 ADR-013 bronze merge, ADR-014 scale-out, ADR-015 cross-replica idempotency, ADR-016
@@ -155,8 +159,10 @@ runs the module — no functional difference.
 - Single `apache/superset` derived image (driver install + `superset_config.py`); SQLite
   metadata; init: `db upgrade` + create admin from env; datasets point at gold/ops tables
   (never raw bronze for dashboards).
-- Dashboard: price/candle chart, volume+VWAP, volatility, pipeline-health (freshness, row
-  counts, last GX result) from `ops.*`.
+- Dashboard: Market tab (price/VWAP, base volume, USD notional, trades/min, volatility,
+  candlestick, notional-share treemap, KPI tiles, daily/hourly summary tables) + Pipeline
+  health tab (lag, batch rows, last GX result, bronze integrity, rows per layer, per-symbol
+  freshness) from gold + the ops/health tables in `tickstream`.
 
 ### 3.9 Compose & Make
 - Services: `kafka` (official image, KRaft RF=1), `producer`, `consumer`, `scheduler`,

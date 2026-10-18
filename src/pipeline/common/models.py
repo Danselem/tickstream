@@ -97,3 +97,27 @@ class IntegrityResult(BaseModel):
     def ok(self) -> bool:
         return self.duplicates == 0
 
+
+class LayerCount(BaseModel):
+    """Row count of one medallion layer at collection time (ADR-021).
+
+    Bronze -> silver -> gold counts show that nothing is lost between layers.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    collected_at: datetime
+    layer: str = Field(min_length=1)
+    row_count: int = Field(ge=0)
+
+
+class SymbolFreshness(BaseModel):
+    """Per-symbol freshness: how far the latest event lags the check time (ADR-021)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    collected_at: datetime
+    symbol: str = Field(min_length=1)
+    max_event_time: datetime | None = None
+    freshness_seconds: float | None = Field(default=None, ge=0)
+

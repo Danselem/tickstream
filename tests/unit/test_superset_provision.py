@@ -58,7 +58,7 @@ def test_adhoc_builders_shape() -> None:
 
 def test_chart_specs_cover_both_tabs() -> None:
     specs = chart_specs(["XRPUSDT"])
-    assert len(specs) == 15
+    assert len(specs) == 17
     assert {spec.tab for spec in specs} == {provision.TAB_MARKET, provision.TAB_HEALTH}
     assert {spec.dataset for spec in specs} == {
         provision.GOLD_TABLE,
@@ -67,18 +67,29 @@ def test_chart_specs_cover_both_tabs() -> None:
         provision.QUALITY_TABLE,
         provision.METRICS_TABLE,
         provision.INTEGRITY_TABLE,
+        provision.FRESHNESS_TABLE,
+        provision.LAYER_COUNTS_TABLE,
     }
     # Market tab is business-facing; pipeline health tab is the ops view.
     market = [spec for spec in specs if spec.tab == provision.TAB_MARKET]
     health = [spec for spec in specs if spec.tab == provision.TAB_HEALTH]
-    assert len(market) == 11 and len(health) == 4
+    assert len(market) == 11 and len(health) == 6
     # The candlestick and the two summary tables span a full row.
     wide = [spec.name for spec in market if spec.wide]
     assert wide == [
         "XRPUSDT price — candlestick (1m)",
-        "Market summary — today (UTC)",
-        "Market summary — hourly",
+        "Market summary — last 24h (UTC)",
+        "Market summary — hourly (last 24h)",
     ]
+    # Summary/KPI charts use a 24h trailing window; everything else 7d.
+    summary = {spec.name for spec in specs if spec.time_range == provision.SUMMARY_TIME_RANGE}
+    assert summary == {
+        "Market summary — last 24h (UTC)",
+        "Market summary — hourly (last 24h)",
+        "Notional share by coin (last 24h)",
+        "Total notional (USD, last 24h)",
+        "Trades (last 24h)",
+    }
 
 
 def test_chart_specs_single_symbol_filters() -> None:
@@ -91,7 +102,7 @@ def test_chart_specs_single_symbol_filters() -> None:
 
 def test_chart_specs_multi_symbol_groups_by_symbol() -> None:
     specs = chart_specs(["BTCUSDT", "ETHUSDT"])
-    assert len(specs) == 15
+    assert len(specs) == 17
     coin_specs = [spec for spec in specs if spec.dataset == provision.GOLD_TABLE]
     assert len(coin_specs) == 6
     for spec in coin_specs:

@@ -40,7 +40,9 @@ from pipeline.common.config import Settings
 from pipeline.common.models import (
     BatchReport,
     IntegrityResult,
+    LayerCount,
     QualityResult,
+    SymbolFreshness,
     TradeEvent,
 )
 
@@ -54,6 +56,8 @@ BRONZE_KEYS = ["symbol", "trade_id"]
 QUALITY_RESULTS_TABLE = "quality_results"
 PIPELINE_METRICS_TABLE = "pipeline_metrics"
 INTEGRITY_RESULTS_TABLE = "integrity_results"
+LAYER_COUNTS_TABLE = "layer_counts"
+SYMBOL_FRESHNESS_TABLE = "symbol_freshness"
 
 
 @dataclass(frozen=True)
@@ -63,6 +67,8 @@ class OpsTables:
     quality: Table
     metrics: Table
     integrity: Table
+    layer_counts: Table
+    freshness: Table
 
 BRONZE_ARROW_SCHEMA = pa.schema(
     [
@@ -250,6 +256,23 @@ INTEGRITY_RESULTS_ARROW_SCHEMA = pa.schema(
     ]
 )
 
+LAYER_COUNTS_ARROW_SCHEMA = pa.schema(
+    [
+        pa.field("collected_at", pa.timestamp("us"), nullable=False),
+        pa.field("layer", pa.string(), nullable=False),
+        pa.field("row_count", pa.int64(), nullable=False),
+    ]
+)
+
+SYMBOL_FRESHNESS_ARROW_SCHEMA = pa.schema(
+    [
+        pa.field("collected_at", pa.timestamp("us"), nullable=False),
+        pa.field("symbol", pa.string(), nullable=False),
+        pa.field("max_event_time", pa.timestamp("us"), nullable=True),
+        pa.field("freshness_seconds", pa.float64(), nullable=True),
+    ]
+)
+
 
 def quality_results_schema() -> Schema:
     """Ops table: one row per GX run (append-only; replays may duplicate rows)."""
@@ -284,6 +307,25 @@ def integrity_results_schema() -> Schema:
         NestedField(4, "distinct_keys", LongType(), required=True),
         NestedField(5, "duplicates", LongType(), required=True),
         NestedField(6, "run_ms", DoubleType(), required=True),
+    )
+
+
+def layer_counts_schema() -> Schema:
+    """Ops table: one row per layer (bronze/silver/gold) per health check (ADR-021)."""
+    return Schema(
+        NestedField(1, "collected_at", TimestampType(), required=True),
+        NestedField(2, "layer", StringType(), required=True),
+        NestedField(3, "row_count", LongType(), required=True),
+    )
+
+
+def symbol_freshness_schema() -> Schema:
+    """Ops table: one row per symbol per health check (ADR-021, append-only)."""
+    return Schema(
+        NestedField(1, "collected_at", TimestampType(), required=True),
+        NestedField(2, "symbol", StringType(), required=True),
+        NestedField(3, "max_event_time", TimestampType(), required=False),
+        NestedField(4, "freshness_seconds", DoubleType(), required=False),
     )
 
 
@@ -330,7 +372,7 @@ def metrics_to_arrow(report: BatchReport, collected_at: datetime) -> pa.Table:
 
 
 def ensure_ops_tables(catalog: Catalog, database: str) -> "OpsTables":
-    """Create quality_results + pipeline_metrics + integrity_results if absent."""
+    """Create the ops tables (quality, metrics, integrity, layer counts, freshness)."""
     properties = {"format-version": "2", "write.format.default": "parquet"}
     quality = catalog.create_table_if_not_exists(
         f"{database}.{QUALITY_RESULTS_TABLE}",
@@ -347,7 +389,37 @@ def ensure_ops_tables(catalog: Catalog, database: str) -> "OpsTables":
         schema=integrity_results_schema(),
         properties=properties,
     )
-    return OpsTables(quality=quality, metrics=metrics, integrity=integrity)
+    layer_counts = catalog.create_table_if_not_exists(
+        f"{database}.{LAYER_COUNTS_TABLE}",
+        schema=layer_counts_schema(),
+        properties=properties,
+    )
+    freshness = catalog.create_table_if_not_exists(
+        f"{database}.{SYMBOL_FRESHNESS_TABLE}",
+        schema=symbol_freshness_schema(),
+        properties=properties,
+    )
+    return OpsTables(
+        quality=quality,
+        metrics=metrics,
+        integrity=integrity,
+        layer_counts=layer_counts,
+        freshness=freshness,
+    )
+
+
+def table_row_count(table: Table) -> int:
+    """Row count for a lake table, cheaply.
+
+    Prefers the current snapshot summary (`total-records`, O(1)); falls back to a
+    single-column scan (all medallion tables carry `symbol`).
+    """
+    snapshot = table.metadata.current_snapshot()
+    if snapshot is not None and snapshot.summary:
+        total = snapshot.summary.get("total-records")
+        if total is not None:
+            return int(total)
+    return int(table.scan(selected_fields=("symbol",)).to_arrow().num_rows)
 
 
 def integrity_result_to_arrow(result: IntegrityResult) -> pa.Table:
@@ -364,6 +436,39 @@ def integrity_result_to_arrow(result: IntegrityResult) -> pa.Table:
             }
         ],
         schema=INTEGRITY_RESULTS_ARROW_SCHEMA,
+    )
+
+
+def layer_counts_to_arrow(rows: list[LayerCount]) -> pa.Table:
+    """Convert layer row counts to Arrow for the layer_counts ops table."""
+    return pa.Table.from_pylist(
+        [
+            {
+                "collected_at": _naive_utc(row.collected_at),
+                "layer": row.layer,
+                "row_count": row.row_count,
+            }
+            for row in rows
+        ],
+        schema=LAYER_COUNTS_ARROW_SCHEMA,
+    )
+
+
+def symbol_freshness_to_arrow(rows: list[SymbolFreshness]) -> pa.Table:
+    """Convert per-symbol freshness to Arrow for the symbol_freshness ops table."""
+    return pa.Table.from_pylist(
+        [
+            {
+                "collected_at": _naive_utc(row.collected_at),
+                "symbol": row.symbol,
+                "max_event_time": (
+                    None if row.max_event_time is None else _naive_utc(row.max_event_time)
+                ),
+                "freshness_seconds": row.freshness_seconds,
+            }
+            for row in rows
+        ],
+        schema=SYMBOL_FRESHNESS_ARROW_SCHEMA,
     )
 
 

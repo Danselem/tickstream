@@ -377,5 +377,49 @@ Short records of each non-obvious choice: context, decision, consequence.
   `uuid` is required for filter targets, so provisioning fails loudly if the
   dataset has none.
 
+## ADR-021 — Lake-level health: per-layer row counts and per-symbol freshness
 
+- Context: the Pipeline health tab showed Kafka lag, batch rows, quality runs and
+  bronze uniqueness — all *pipeline* signals — but nothing about the lake itself:
+  did rows actually land in bronze/silver/gold, and how stale is each symbol? The
+  quality gate only looks at a recent window; a stuck layer would only show up
+  indirectly, later.
+- Decision: compute two lake-health facts once per maintenance cycle and surface
+  them on the health tab.
+  - `pipeline.quality.health.compute_health` (pure) takes the loaded layer tables
+    plus `now`, and returns `LayerCount` rows (`table_row_count` per layer) and
+    `SymbolFreshness` rows (`now − max(event_time)` per symbol from gold).
+  - `run_pipeline_health` loads bronze/silver/gold, skips any missing table
+    (`NoSuchTableError`), and appends to two new Glue ops tables — `layer_counts`
+    (`layer`, `row_count`) and `symbol_freshness` (`symbol`, `max_event_time`,
+    `freshness_seconds`) — via the same append+arrow path as the other ops tables.
+  - `table_row_count` prefers the snapshot summary `total-records` (O(1)); it falls
+    back to a single-column (`symbol`) scan, which is what pyiceberg's append
+    currently requires for large tables.
+  - The scheduler runs it inside `with_maintenance` (after the integrity check,
+    before dbt) and exposes `--health-only` / `make health` for an ad-hoc refresh.
+  - Two Health charts read the tables: "Row counts by layer (bronze → gold)" and
+    "Data freshness by symbol (seconds)".
+- Consequence: the health tab now answers "is data landing and is it fresh", and
+  the tables are queryable in Athena for alerting later. Trade-off: counts are a
+  maintenance-cadence snapshot, not continuous; on the current data volume the
+  fallback scan costs ~50 s for a full refresh (acceptable off the hot path).
 
+## ADR-022 — Trailing time windows for provisioned charts (`now-Nd : now`)
+
+- Context: every chart was provisioned with the Superset preset `time_range="Last
+  day"`. Superset's named presets (`Last day`, `Last 7 days`, `today`) are anchored
+  to **midnight** and exclude the current day: "Last day" renders `>= yesterday
+  00:00 AND < today 00:00`. The freshly-collected ops rows (written today) therefore
+  rendered as *no data*, and the "today" KPIs were silently showing *yesterday*.
+- Decision: use explicit trailing-window ranges relative to now instead of presets.
+  - Constant `TIME_RANGE = "now-7d : now"` for series/ops charts; `SUMMARY_TIME_RANGE
+    = "now-1d : now"` for the daily/hourly summary tables, the notional treemap and
+    the two KPI tiles. `ChartSpec` carries a per-chart `time_range`, threaded into
+    every param builder (they already passed it to `big_number_params`).
+  - Rename labels that implied a calendar day ("today") to name the window
+    ("last 24h"), so the title matches the filter.
+- Consequence: the newest point is always in view and titles match the data window.
+  Trade-off: `now-…` ranges are evaluated per request (the SQL is not deterministic
+  across days), which is fine for a live dashboard but means screenshots/exported
+  SQL differ day to day.

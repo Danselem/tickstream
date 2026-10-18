@@ -11,7 +11,7 @@ BACKEND_CONFIG := $(INFRA_DIR)/backend.hcl
 
 ALERT_EMAIL ?= budget-alerts@example.com
 
-.PHONY: help install up down logs restart lint format typecheck test quality dbt-build dbt-refresh maintenance compact dedup-bronze integrity superset infra-bootstrap infra-plan infra-apply
+.PHONY: help install up down logs restart lint format typecheck test quality dbt-build dbt-refresh maintenance compact dedup-bronze integrity health superset infra-bootstrap infra-plan infra-apply
 
 help: ## Show targets
 	@grep -E '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS=":.*?## "} {printf "  %-16s %s\n", $$1, $$2}'
@@ -68,6 +68,9 @@ dedup-bronze: ## One-time bronze dedup rewrite (stop consumers first; ADR-015)
 
 integrity: ## Whole-table bronze duplicate check (ADR-016)
 	$(UV) python -m pipeline.scheduler --integrity-only
+
+health: ## Collect per-layer row counts + per-symbol freshness (ADR-021)
+	$(UV) python -m pipeline.scheduler --health-only
 
 superset: ## Re-run dashboard provisioning against the running Superset (Phase 3+)
 	docker compose exec superset python /app/provision/provision.py

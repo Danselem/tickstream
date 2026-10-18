@@ -26,6 +26,8 @@ HOURLY_SUMMARY_TABLE = "gold_market_summary_hourly"
 QUALITY_TABLE = "quality_results"
 METRICS_TABLE = "pipeline_metrics"
 INTEGRITY_TABLE = "integrity_results"
+FRESHNESS_TABLE = "symbol_freshness"
+LAYER_COUNTS_TABLE = "layer_counts"
 DASHBOARD_SLUG = "tickstream"
 DASHBOARD_TITLE = "Tickstream — crypto pipeline"
 
@@ -42,9 +44,16 @@ DATASET_TABLES = (
     QUALITY_TABLE,
     METRICS_TABLE,
     INTEGRITY_TABLE,
+    FRESHNESS_TABLE,
+    LAYER_COUNTS_TABLE,
 )
 
-TIME_RANGE = "Last day"
+# Trailing windows relative to "now". Superset's named presets ("Last day",
+# "Last 7 days", "today") are anchored to midnight and exclude the current day,
+# so a freshly-collected ops row would render as "no data". A relative range
+# keeps the newest point in view.
+TIME_RANGE = "now-7d : now"
+SUMMARY_TIME_RANGE = "now-1d : now"
 
 # Friendly column headers (dataset `verbose_name`). Charts and tables that show
 # raw column names are unreadable to a business viewer, so every dataset gets
@@ -75,6 +84,9 @@ COLUMN_LABELS: dict[str, str] = {
     "rows": "Batch rows",
     "checked_at": "Checked at (UTC)",
     "duplicates": "Duplicate keys",
+    "layer": "Layer",
+    "row_count": "Rows",
+    "freshness_seconds": "Freshness (seconds)",
 }
 
 
@@ -165,8 +177,9 @@ def timeseries_params(
     x_axis_title: str | None = None,
     y_axis_title: str | None = None,
     x_axis_time_format: str = "%H:%M",
+    time_range: str = TIME_RANGE,
 ) -> dict[str, Any]:
-    params = _base_params(dataset_id, viz_type)
+    params = _base_params(dataset_id, viz_type, time_range=time_range)
     params["x_axis"] = x_axis
     params["metrics"] = metrics
     # Labels and legend: without these the chart is a wall of anonymous lines
@@ -194,9 +207,14 @@ def timeseries_params(
 
 
 def table_params(
-    dataset_id: int, *, columns: list[str], order_by: str, row_limit: int = 20
+    dataset_id: int,
+    *,
+    columns: list[str],
+    order_by: str,
+    row_limit: int = 20,
+    time_range: str = TIME_RANGE,
 ) -> dict[str, Any]:
-    params = _base_params(dataset_id, "table")
+    params = _base_params(dataset_id, "table", time_range=time_range)
     params["query_mode"] = "raw"
     params["columns"] = columns
     params["orderby"] = [[order_by, False]]
@@ -219,6 +237,7 @@ def candlestick_params(
     series: str | None = None,
     time_grain_sqla: str | None = None,
     y_axis_format: str | None = None,
+    time_range: str = TIME_RANGE,
 ) -> dict[str, Any]:
     """OHLC candlestick (viz_type ``candlestick``; metric keys open/close/high/low).
 
@@ -226,7 +245,7 @@ def candlestick_params(
     Set ``series`` (a dimension) so multiple symbols draw separate candle series
     instead of collapsing into one.
     """
-    params = _base_params(dataset_id, "candlestick")
+    params = _base_params(dataset_id, "candlestick", time_range=time_range)
     params["x_axis"] = x_axis
     params["open"] = adhoc_metric(open_column, "MAX", label="Open")
     params["close"] = adhoc_metric(close_column, "MAX", label="Close")
@@ -255,9 +274,10 @@ def treemap_params(
     metric: dict[str, Any],
     filters: list[dict[str, Any]] | None = None,
     number_format: str | None = None,
+    time_range: str = TIME_RANGE,
 ) -> dict[str, Any]:
     """Proportional treemap (viz_type ``treemap_v2``): metric split by groupby."""
-    params = _base_params(dataset_id, "treemap_v2")
+    params = _base_params(dataset_id, "treemap_v2", time_range=time_range)
     params["groupby"] = groupby
     params["metric"] = metric
     params["sort_by_metric"] = True
@@ -302,6 +322,7 @@ class ChartSpec:
     x_axis_title: str = "Time (UTC)"
     y_axis_title: str = ""
     x_axis_time_format: str = "%H:%M"
+    time_range: str = TIME_RANGE
 
 
 def chart_specs(symbols: list[str]) -> list[ChartSpec]:
@@ -416,11 +437,12 @@ def chart_specs(symbols: list[str]) -> list[ChartSpec]:
             },
         ),
         ChartSpec(
-            name="Market summary — today (UTC)",
+            name="Market summary — last 24h (UTC)",
             tab=TAB_MARKET,
             viz_type="table",
             dataset=DAILY_SUMMARY_TABLE,
             wide=True,
+            time_range=SUMMARY_TIME_RANGE,
             params={
                 "columns": [
                     "symbol",
@@ -439,11 +461,12 @@ def chart_specs(symbols: list[str]) -> list[ChartSpec]:
             },
         ),
         ChartSpec(
-            name="Market summary — hourly",
+            name="Market summary — hourly (last 24h)",
             tab=TAB_MARKET,
             viz_type="table",
             dataset=HOURLY_SUMMARY_TABLE,
             wide=True,
+            time_range=SUMMARY_TIME_RANGE,
             params={
                 "columns": [
                     "symbol",
@@ -462,10 +485,11 @@ def chart_specs(symbols: list[str]) -> list[ChartSpec]:
             },
         ),
         ChartSpec(
-            name="Notional share by coin (today)",
+            name="Notional share by coin (last 24h)",
             tab=TAB_MARKET,
             viz_type="treemap_v2",
             dataset=DAILY_SUMMARY_TABLE,
+            time_range=SUMMARY_TIME_RANGE,
             params={
                 "groupby": ["symbol"],
                 "metric": adhoc_metric("notional", "SUM"),
@@ -473,10 +497,11 @@ def chart_specs(symbols: list[str]) -> list[ChartSpec]:
             },
         ),
         ChartSpec(
-            name="Total notional today (USD)",
+            name="Total notional (USD, last 24h)",
             tab=TAB_MARKET,
             viz_type="big_number_total",
             dataset=DAILY_SUMMARY_TABLE,
+            time_range=SUMMARY_TIME_RANGE,
             params={
                 "metric": adhoc_metric("notional", "SUM"),
                 "subheader": "USD notional, last 24h",
@@ -484,10 +509,11 @@ def chart_specs(symbols: list[str]) -> list[ChartSpec]:
             },
         ),
         ChartSpec(
-            name="Trades today",
+            name="Trades (last 24h)",
             tab=TAB_MARKET,
             viz_type="big_number_total",
             dataset=DAILY_SUMMARY_TABLE,
+            time_range=SUMMARY_TIME_RANGE,
             params={
                 "metric": adhoc_metric("trade_count", "SUM"),
                 "subheader": "Trades, last 24h",
@@ -551,6 +577,34 @@ def chart_specs(symbols: list[str]) -> list[ChartSpec]:
                 "y_axis_format": ",.0f",
             },
         ),
+        ChartSpec(
+            name="Data freshness by symbol (seconds)",
+            tab=TAB_HEALTH,
+            viz_type="echarts_timeseries_line",
+            dataset=FRESHNESS_TABLE,
+            x_axis_title="Time (UTC)",
+            y_axis_title="Freshness (seconds)",
+            params={
+                "x_axis": "collected_at",
+                "groupby": ["symbol"],
+                "metrics": [adhoc_metric("freshness_seconds", "MAX")],
+                "y_axis_format": ",.0f",
+            },
+        ),
+        ChartSpec(
+            name="Row counts by layer (bronze → gold)",
+            tab=TAB_HEALTH,
+            viz_type="echarts_timeseries_line",
+            dataset=LAYER_COUNTS_TABLE,
+            x_axis_title="Time (UTC)",
+            y_axis_title="Rows",
+            params={
+                "x_axis": "collected_at",
+                "groupby": ["layer"],
+                "metrics": [adhoc_metric("row_count", "MAX")],
+                "y_axis_format": ",.0f",
+            },
+        ),
     ]
 
 
@@ -566,6 +620,7 @@ def chart_params(spec: ChartSpec, dataset_id: int) -> dict[str, Any]:
             columns=spec.params["columns"],
             order_by=spec.params["order_by"],
             row_limit=limit,
+            time_range=spec.time_range,
         )
     if spec.viz_type == "candlestick":
         return candlestick_params(
@@ -579,6 +634,7 @@ def chart_params(spec: ChartSpec, dataset_id: int) -> dict[str, Any]:
             series=spec.params.get("series"),
             time_grain_sqla=spec.params.get("time_grain_sqla"),
             y_axis_format=spec.params.get("y_axis_format"),
+            time_range=spec.time_range,
         )
     if spec.viz_type == "treemap_v2":
         return treemap_params(
@@ -587,6 +643,7 @@ def chart_params(spec: ChartSpec, dataset_id: int) -> dict[str, Any]:
             metric=spec.params["metric"],
             filters=spec.params.get("filters") or None,
             number_format=spec.params.get("number_format"),
+            time_range=spec.time_range,
         )
     if spec.viz_type in {"big_number", "big_number_total"}:
         return big_number_params(
@@ -595,7 +652,7 @@ def chart_params(spec: ChartSpec, dataset_id: int) -> dict[str, Any]:
             viz_type=spec.viz_type,
             subheader=spec.params.get("subheader"),
             y_axis_format=spec.params.get("y_axis_format"),
-            time_range=spec.params.get("time_range", TIME_RANGE),
+            time_range=spec.time_range,
         )
     metrics = spec.params.get("metrics", [])
     filters = spec.params.get("filters")
@@ -621,6 +678,7 @@ def chart_params(spec: ChartSpec, dataset_id: int) -> dict[str, Any]:
         x_axis_title=spec.x_axis_title,
         y_axis_title=spec.y_axis_title or None,
         x_axis_time_format=spec.x_axis_time_format,
+        time_range=spec.time_range,
     )
 
 

@@ -12,6 +12,7 @@ from collections.abc import Callable, Sequence
 from pipeline.common.config import Settings, get_settings
 from pipeline.common.logging import configure_logging, get_logger
 from pipeline.quality import run_quality
+from pipeline.quality.health import run_pipeline_health
 from pipeline.quality.integrity import run_integrity
 from pipeline.scheduler.dbt_runner import run_dbt_build
 from pipeline.scheduler.maintenance import MAINTENANCE_TABLES, run_maintenance
@@ -55,6 +56,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="run the whole-table bronze duplicate check and exit",
     )
+    parser.add_argument(
+        "--health-only",
+        action="store_true",
+        help="collect per-layer row counts and per-symbol freshness, then exit",
+    )
     return parser.parse_args(argv)
 
 
@@ -87,6 +93,7 @@ def run_once(
                 total_rows=integrity.total_rows,
             )
             return 1
+        run_pipeline_health(settings)
     if not quality_only:
         dbt_returncode = run_dbt_build()
         if dbt_returncode != 0:
@@ -113,6 +120,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0 if run_dedup(settings).ok else 1
     if args.integrity_only:
         return 0 if run_integrity(settings).ok else 1
+    if args.health_only:
+        run_pipeline_health(settings)
+        return 0
     if args.maintenance_only:
         tables = tuple(t.strip() for t in args.tables.split(",") if t.strip())
         return run_maintenance_only(settings, tables)
