@@ -449,3 +449,9 @@ def test_market_charts_use_detail_and_trend_windows() -> None:
     assert len(detail) == 6
     for spec in detail:
         assert spec.time_range in (provision.DETAIL_TIME_RANGE, provision.TREND_TIME_RANGE)
+
+
+def test_symbol_values_predicate_limits_to_configured_coins() -> None:
+    assert provision.symbol_values_predicate(["BTCUSDT", "ETHUSDT"]) == (
+        "symbol IN ('BTCUSDT', 'ETHUSDT')"
+    )

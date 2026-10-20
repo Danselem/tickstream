@@ -336,6 +336,16 @@ class ChartSpec:
     time_range: str = TIME_RANGE
 
 
+def symbol_values_predicate(symbols: list[str]) -> str:
+    """Restrict native-filter values to configured coins.
+
+    The unified view still holds a few thousand live-only XRP rows from an
+    earlier config, but XRP is not a tracked symbol; the dropdown should not
+    offer it (charts can still query it explicitly)."""
+    quoted = ", ".join(f"'{symbol}'" for symbol in symbols)
+    return f"symbol IN ({quoted})"
+
+
 def chart_specs(symbols: list[str]) -> list[ChartSpec]:
     """Business "Market" tab + engineering "Pipeline health" tab.
 
@@ -991,6 +1001,9 @@ class Api:
         )
         return int(created["id"])
 
+    def set_fetch_values_predicate(self, dataset_id: int, predicate: str) -> None:
+        self._request("PUT", f"/api/v1/dataset/{dataset_id}", {"fetch_values_predicate": predicate})
+
     def _all_datasets(self) -> list[dict[str, Any]]:
         result = self._request("GET", "/api/v1/dataset/")
         items = result.get("result", [])
@@ -1131,6 +1144,7 @@ def main() -> None:
     dataset_ids = {table: api.ensure_dataset(db_id, schema, table) for table in DATASET_TABLES}
     for dataset_id in dataset_ids.values():
         api.label_columns(dataset_id, COLUMN_LABELS)
+    api.set_fetch_values_predicate(dataset_ids[UNIFIED_TABLE], symbol_values_predicate(symbols))
 
     placed: dict[str, list[tuple[int, str, bool]]] = {tab: [] for tab in TAB_ORDER}
     gold_chart_ids: list[int] = []
