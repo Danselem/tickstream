@@ -88,7 +88,11 @@ def run_once(
 ) -> int:
     """One cycle. Returns 0 on full success, 1 on GX/integrity failure, dbt's
     code otherwise. The whole-table integrity check runs on maintenance cycles,
-    before dbt, so a duplicate blocks the build (Brief §6)."""
+    before dbt, so a duplicate blocks the build (Brief §6). Health runs before
+    the gate on maintenance cycles so ops metrics advance even when a quality
+    check fails."""
+    if with_maintenance:
+        run_pipeline_health(settings)
     quality = run_quality(settings)
     if not quality.success:
         logger.error(
@@ -106,7 +110,6 @@ def run_once(
                 total_rows=integrity.total_rows,
             )
             return 1
-        run_pipeline_health(settings)
     if not quality_only:
         dbt_returncode = run_dbt_build()
         if dbt_returncode != 0:
