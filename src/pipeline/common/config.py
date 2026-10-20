@@ -25,6 +25,10 @@ class Settings(BaseSettings):
 
     # Source
     symbols: list[str] = ["XRPUSDT"]
+    # Optional explicit Kafka partition per symbol. Unmapped symbols fall back to
+    # the key hash; pinning a few hot symbols keeps one partition from owning
+    # most of the traffic (ADR-028). Values must be valid partition indexes.
+    symbol_partitions: dict[str, int] = {}
     binance_ws_url: str = "wss://data-stream.binance.vision"
     # Websocket keepalive (s). ping_timeout raised after Oct 2026: the 20 s default
     # tripped "keepalive ping timeout" (close 1011) on Docker-network hiccups.

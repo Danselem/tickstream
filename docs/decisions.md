@@ -528,3 +528,23 @@ Short records of each non-obvious choice: context, decision, consequence.
   and labels no longer sit on top of the plotted series. Trade-off: the default
   coin is the first entry of `TICKSTREAM_SYMBOLS` (re-provision after reordering);
   the 24 h detail still inherits live-ingestion gaps for the current day.
+
+## ADR-028 — Explicit symbol→partition routing for `trades.raw`
+
+- Context: `trades.raw` has 3 partitions and the producer keyed by symbol with
+  Kafka's murmur2 partitioner. In Oct 2026 six of the seven coins hashed to
+  partition 0 (BTC+ETH ≈ 74% of all trades). One consumer is capped at ~240
+  msg/s (20k-row merge ≈ 60–85 s), so that partition's lag grew and BTC/ETH
+  gold candles fell ~1 h behind while the other two consumers idled.
+- Decision: keep 3 partitions and key=symbol, but add an optional
+  `TICKSTREAM_SYMBOL_PARTITIONS` JSON map (symbol → partition) applied when the
+  producer sends. Unmapped symbols keep the hash. Invalid indexes fail at
+  producer start. Current pinning: BTC→1, ETH/DOGE/LINK→2, SOL/ADA/AVAX→0.
+  Key=symbol is preserved, so each symbol still lands on exactly one partition
+  (per-symbol ordering and single-writer ownership for the Iceberg merge).
+- Consequence: no topic change and no offset reset; new BTC traffic is fresh
+  immediately and the 440k-message partition-0 backlog drains in ~35 min at
+  ~195 msg/s while new traffic there is light. The drained rows land in bronze
+  late, so a one-off silver/gold catch-up with wider lookbacks is needed
+  afterwards. The map is volume-dependent: revisit it when the symbol mix or
+  trade rates change materially (and before adding the `@ticker` stream).

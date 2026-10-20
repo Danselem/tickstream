@@ -9,6 +9,8 @@ from pipeline.common.models import TradeEvent
 
 logger = get_logger("producer.kafka")
 
+TRADE_PARTITIONS = 3
+
 
 class TradeProducer:
     """Produces validated trade events, keyed by symbol."""
@@ -16,6 +18,12 @@ class TradeProducer:
     def __init__(self, settings: Settings) -> None:
         self._topic = settings.topic
         self._bootstrap = settings.kafka_bootstrap
+        self._partition_map = dict(settings.symbol_partitions)
+        for symbol, partition in self._partition_map.items():
+            if not 0 <= partition < TRADE_PARTITIONS:
+                raise ValueError(
+                    f"partition {partition} for {symbol} is outside 0..{TRADE_PARTITIONS - 1}"
+                )
         self._producer = Producer(
             {
                 "bootstrap.servers": self._bootstrap,
@@ -27,7 +35,7 @@ class TradeProducer:
         )
 
     def ensure_topic(
-        self, *, partitions: int = 3, retention_ms: int = 7 * 24 * 3600 * 1000
+        self, *, partitions: int = TRADE_PARTITIONS, retention_ms: int = 7 * 24 * 3600 * 1000
     ) -> None:
         """Create the topic if absent (replication 1: single KRaft broker)."""
         admin = AdminClient({"bootstrap.servers": self._bootstrap})
@@ -57,6 +65,7 @@ class TradeProducer:
             self._topic,
             key=event.symbol.encode(),
             value=event.model_dump_json().encode(),
+            partition=self._partition_map.get(event.symbol, -1),
             on_delivery=_on_delivery,
         )
         self._producer.poll(0)
