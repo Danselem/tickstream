@@ -63,8 +63,10 @@ TABLES ?= bronze_trades
 compact: ## Compact+clean Iceberg tables via Athena OPTIMIZE/VACUUM (bypasses quality gate)
 	$(UV) python -m pipeline.scheduler --once --maintenance-only --tables $(TABLES)
 
-dedup-bronze: ## One-time bronze dedup rewrite (stop consumers first; ADR-015)
-	$(UV) python -m pipeline.scheduler --dedup-bronze
+DAYS ?=
+KEY ?=
+dedup-bronze: ## Dedup (stop consumers first; DAYS=3 scopes, KEY=SYM:ID targets one key)
+	$(UV) python -m pipeline.scheduler --dedup-bronze $(if $(DAYS),--dedup-days $(DAYS),) $(if $(KEY),--dedup-key $(KEY),)
 
 integrity: ## Whole-table bronze duplicate check (ADR-016)
 	$(UV) python -m pipeline.scheduler --integrity-only

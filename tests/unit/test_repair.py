@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 from pyiceberg.exceptions import NamespaceAlreadyExistsError
+from pyiceberg.expressions import GreaterThanOrEqual, Reference, literal
 from pyiceberg.table import Table
 
 from pipeline.common.config import Settings
@@ -21,7 +22,9 @@ from pipeline.scheduler import run as run_module
 from pipeline.scheduler.repair import (
     DedupOutcome,
     dedup_arrow,
+    dedup_key,
     dedup_table,
+    parse_key,
     run_dedup,
 )
 
@@ -90,6 +93,37 @@ def test_dedup_table_clean_table_is_noop(tmp_path: Path) -> None:
     assert before == after == 2
 
 
+def test_dedup_table_scoped_rewrites_only_matching_days(tmp_path: Path) -> None:
+    table = _catalog_with_dupes(tmp_path)  # 2 duplicate + 1 clean rows on Jan 1
+    later = datetime(2026, 1, 5, 12, 0, 0, tzinfo=UTC)
+    dup = _event(3, 0).model_copy(update={"event_time": later, "ingest_time": later})
+    table.append(events_to_arrow([dup, dup]))
+    assert table.scan().to_arrow().num_rows == 5
+
+    since = GreaterThanOrEqual(
+        term=Reference("event_time"), value=literal(datetime(2026, 1, 4))
+    )
+    before, after = dedup_table(table, since)
+
+    assert (before, after) == (2, 1)  # only Jan 5 was in scope
+    assert table.scan().to_arrow().num_rows == 4  # Jan 1 duplicate untouched
+
+
+def test_parse_key() -> None:
+    assert parse_key("BTCUSDT:6774376484") == ("BTCUSDT", 6774376484)
+    with pytest.raises(ValueError):
+        parse_key("BTCUSDT")
+    with pytest.raises(ValueError):
+        parse_key("BTCUSDT:not-a-number")
+
+
+def test_dedup_key_rewrites_only_that_key(tmp_path: Path) -> None:
+    table = _catalog_with_dupes(tmp_path)  # key 1 duplicated, key 2 clean
+    before, after = dedup_key(table, "ADAUSDT", 1)
+    assert (before, after) == (2, 1)
+    assert table.scan().to_arrow().num_rows == 2
+
+
 def test_run_dedup_reports_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     def boom(*_args: object, **_kwargs: object) -> object:
         raise RuntimeError("glue down")
@@ -100,14 +134,29 @@ def test_run_dedup_reports_failure(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_cli_dedup_bronze_flag(monkeypatch: pytest.MonkeyPatch) -> None:
-    called: list[str] = []
+    called: list[int | None] = []
 
-    def fake_run_dedup(settings: Settings) -> DedupOutcome:
-        called.append("dedup")
+    def fake_run_dedup(settings: Settings, days: int | None = None) -> DedupOutcome:
+        called.append(days)
         return DedupOutcome(BRONZE_TABLE, 3, 2, ok=True)
 
     monkeypatch.setattr(run_module, "run_dedup", fake_run_dedup)
     monkeypatch.setattr(run_module, "get_settings", _settings)
     monkeypatch.setattr(run_module, "configure_logging", lambda *_: None)
     assert run_module.main(["--dedup-bronze"]) == 0
-    assert called == ["dedup"]
+    assert run_module.main(["--dedup-bronze", "--dedup-days", "3"]) == 0
+    assert called == [None, 3]
+
+
+def test_cli_dedup_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    called: list[str] = []
+
+    def fake_run_dedup_key(settings: Settings, key: str) -> DedupOutcome:
+        called.append(key)
+        return DedupOutcome(BRONZE_TABLE, 2, 1, ok=True)
+
+    monkeypatch.setattr(run_module, "run_dedup_key", fake_run_dedup_key)
+    monkeypatch.setattr(run_module, "get_settings", _settings)
+    monkeypatch.setattr(run_module, "configure_logging", lambda *_: None)
+    assert run_module.main(["--dedup-bronze", "--dedup-key", "ADAUSDT:1"]) == 0
+    assert called == ["ADAUSDT:1"]

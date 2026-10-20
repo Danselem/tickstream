@@ -26,6 +26,23 @@ CLOSE_TIMEOUT_S = 10.0
 THROUGHPUT_WINDOW_S = 30.0
 
 
+class StaleStreamError(Exception):
+    """The socket is open but no market data arrived for too long."""
+
+
+async def _recv(ws: Any, stale_after_s: float) -> Any:
+    """Receive one message, or raise `StaleStreamError` if the stream goes silent.
+
+    Binance keeps answering keepalive pings on streams that have stopped
+    delivering data (observed for hours in Oct 2026), so a ping timeout alone is
+    not enough to detect a dead subscription.
+    """
+    try:
+        return await asyncio.wait_for(ws.recv(), timeout=stale_after_s)
+    except TimeoutError as exc:
+        raise StaleStreamError(f"no message for {stale_after_s}s") from exc
+
+
 def stream_url(settings: Settings) -> str:
     """Combined trade-stream URL for every configured symbol (stream names are lowercase)."""
     streams = "/".join(f"{symbol.lower()}@trade" for symbol in settings.symbols)
@@ -54,9 +71,8 @@ async def stream_trades(
                 backoff_s = 1.0
                 window = 0
                 window_start = time.monotonic()
-                async for raw in ws:
-                    if stop.is_set():
-                        return
+                while not stop.is_set():
+                    raw = await _recv(ws, settings.ws_stale_after_s)
                     payload: dict[str, Any] = json.loads(raw)
                     on_message(payload.get("data", payload))
                     total += 1
@@ -70,12 +86,21 @@ async def stream_trades(
                         )
                         window = 0
                         window_start = now
+        except StaleStreamError as exc:
+            logger.warning(
+                "ws_stalled",
+                error=str(exc),
+                stale_after_s=settings.ws_stale_after_s,
+            )
         except Exception as exc:  # noqa: BLE001 — every failure mode must reconnect
-            delay = backoff_s + random.uniform(0, 1)  # noqa: S311 — jitter, not crypto
-            logger.warning("ws_disconnected", error=str(exc), retry_in_s=round(delay, 1))
-            try:
-                await asyncio.wait_for(stop.wait(), timeout=delay)
-                return
-            except TimeoutError:
-                pass
-            backoff_s = min(backoff_s * 2, MAX_BACKOFF_S)
+            logger.warning("ws_disconnected", error=str(exc))
+        if stop.is_set():
+            return
+        delay = backoff_s + random.uniform(0, 1)  # noqa: S311 — jitter, not crypto
+        logger.warning("ws_retry", retry_in_s=round(delay, 1))
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=delay)
+            return
+        except TimeoutError:
+            pass
+        backoff_s = min(backoff_s * 2, MAX_BACKOFF_S)

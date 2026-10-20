@@ -11,6 +11,9 @@
 -- 1-minute OHLC + volume + VWAP + volatility. Incremental MERGE on
 -- (symbol, candle_start) with a 30-minute trailing recompute window, so late
 -- trades correct their candle on the next run instead of duplicating it.
+-- The window is anchored on the target's last candle, so a skipped run is
+-- caught up (override with `--vars '{gold_lookback_minutes: 7200}'`).
+{% set lookback_minutes = var("gold_lookback_minutes", 30) %}
 with window_trades as (
     select symbol, trade_id, event_time, price, quantity
     from {{ ref("silver_trades") }}
@@ -18,10 +21,13 @@ with window_trades as (
     where event_time >= (
         select
             coalesce(
-                date_trunc('minute', max(event_time) - interval '30' minute),
+                date_trunc(
+                    'minute',
+                    max(candle_start) - interval '{{ lookback_minutes }}' minute
+                ),
                 timestamp '1970-01-01 00:00:00'
             )
-        from {{ ref("silver_trades") }}
+        from {{ this }}
     )
     {% endif %}
 ),

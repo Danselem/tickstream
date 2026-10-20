@@ -423,3 +423,54 @@ Short records of each non-obvious choice: context, decision, consequence.
   Trade-off: `now-…` ranges are evaluated per request (the SQL is not deterministic
   across days), which is fine for a live dashboard but means screenshots/exported
   SQL differ day to day.
+
+## ADR-023 — Repair bronze duplicates server-side (`DELETE` both + `INSERT` one)
+
+- Context: one duplicate key (`BTCUSDT:6774376484`, two identical rows) in 1.7 M
+  rows made the GX uniqueness gate fail forever, because the gate validates the
+  whole window and the window only advances on success. The local PyIceberg
+  rewrite (`scan -> dedup -> overwrite`) was too slow over S3 on the current
+  uncompacted layout: a 3-day rewrite ran >15 min without committing, and even a
+  key-filtered local scan stayed too slow.
+- Decision: repair the key in Athena (server-side, prunes by partition and file
+  stats): `DELETE ... WHERE symbol=... AND trade_id=...` removes both identical
+  rows, then `INSERT` the one row back. That is safe because the key is unique
+  after the delete and the row value is deterministic. The PyIceberg path stays
+  for small/compacted tables and offline tests (`dedup_key`/`make dedup-key`).
+- Consequence: the Oct 2026 repair committed in ~40 s (2 -> 0 -> 1 row) and the
+  gate passed (1.85 M rows). Trade-off: it is a manual, two-statement procedure
+  (consumers stopped), documented in `docs/runbook.md`; the durable fix is
+  compaction, which the maintenance loop already runs.
+
+## ADR-024 — Incremental windows anchor on the target, with overridable lookbacks
+
+- Context: gold's incremental filter started at `max(event_time)` of
+  **`silver_trades`** (the source), not of the gold table. After a skipped run the
+  source is already current, so the next build only recomputed the last 30
+  minutes and left a permanent hole. Silver/gold also had holes from dbt being
+  skipped whenever the quality gate failed; the fixed 2 h/30 min lookbacks cannot
+  repair them.
+- Decision: anchor both windows on `{{ this }}` (`max(event_time)` for silver,
+  `max(candle_start)` for gold) and make the lookbacks dbt vars —
+  `silver_lookback_hours` (default 2) and `gold_lookback_minutes` (default 30).
+  A one-off run with large values repairs a gap, e.g.
+  `dbt run --select silver_trades --vars '{silver_lookback_hours: 120}'` then the
+  same for `gold_candles_1m` with `gold_lookback_minutes: 7200`.
+- Consequence: a skipped run is caught up on the next success, and an operator can
+  heal a long outage without a full refresh. Trade-off: a stale table now drives a
+  larger scan on recovery (still bounded and idempotent via the MERGE keys).
+
+## ADR-025 — Treat a silent WebSocket as dead (message watchdog)
+
+- Context: the producer's keepalive only detects a dead TCP path. In Oct 2026 the
+  combined stream stayed open and kept answering pings while delivering **no
+  trades for hours**, so bronze lost whole hours (the producer logged throughput
+  only when a message arrived, hiding the silence). A ping timeout alone
+  (`ws_ping_timeout_s=60`) never fired.
+- Decision: read with `asyncio.wait_for(ws.recv(), timeout=ws_stale_after_s)`
+  (default 60 s). On timeout raise `StaleStreamError`, log `ws_stalled`, and
+  reconnect through the existing backoff. Keep the keepalive for dead TCP.
+- Consequence: a silent subscription recovers within ~1 min instead of hours.
+  Trade-off: 60 s of global silence is abnormal for 7 symbols (BTC/ETH trade
+  every second); if a very quiet symbol set is ever configured, raise the
+  threshold. Historical holes are repaired by the archive backfill, not by this.

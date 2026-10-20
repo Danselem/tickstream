@@ -69,13 +69,22 @@ def main() -> None:
         # Commit the in-flight window before the new owner takes these partitions
         # so it replays as little as possible (ADR-015). _flush is idempotent:
         # with an already-empty buffer it is a no-op.
+        nonlocal running
         logger.info("partitions_revoked", partitions=[p.partition for p in partitions])
-        _flush()
+        try:
+            _flush()
+        except Exception as exc:  # noqa: BLE001 — never write after losing ownership
+            logger.error("revoke_flush_failed", error=str(exc))
+            running = False
 
     def _on_lost(_consumer: Consumer, partitions: list[TopicPartition]) -> None:
-        # Lost without a clean revoke (e.g. max.poll exceeded): offsets cannot be
-        # committed here; the new owner replays and the anti-join absorbs it.
+        # Lost without a clean revoke (e.g. max.poll exceeded). Stop writing
+        # immediately: continuing would let a former owner append rows that the
+        # new owner also writes (the Oct 2026 one-row duplicate). The process
+        # exits; the container restarts and rejoins with a clean assignment.
+        nonlocal running
         logger.error("partitions_lost", partitions=[p.partition for p in partitions])
+        running = False
 
     consumer.subscribe(
         [settings.topic], on_revoke=_on_revoke, on_lost=_on_lost

@@ -83,8 +83,18 @@ miss duplicates outside its window.
    FROM bronze_trades` — if `c > d`, there are duplicates.
 2. Stop the writers (the rewrite must not race appends):
    `docker compose stop consumer`.
-3. `make dedup-bronze` — PyIceberg rewrite keeping the first row per key
-   (`scan -> dedup -> table.overwrite`; Athena can't express this). Minutes.
+3. Repair. For one/few known keys, do it server-side (Athena, ~40 s per key;
+   stop consumers first). Copy the row, delete **both** copies, insert one:
+   ```sql
+   SELECT * FROM bronze_trades WHERE symbol='BTCUSDT' AND trade_id=123;
+   DELETE FROM bronze_trades WHERE symbol='BTCUSDT' AND trade_id=123;
+   INSERT INTO bronze_trades (symbol, trade_id, price, quantity, event_time,
+     ingest_time, is_buyer_maker) VALUES ('BTCUSDT', 123, ..., timestamp '...',
+     timestamp '...', true);
+   ```
+   `make dedup-key KEY=BTCUSDT:123` / `make dedup-bronze DAYS=3` use PyIceberg
+   instead; they are only practical on a small/compacted table (a 3-day rewrite
+   of the current 4k-file bronze did not finish in 15 min).
 4. `make up` (`--scale consumer=3`) to restart the fixed image.
 5. Re-check: `c == d`, then `make quality` (uniqueness gate green) and
    `make dbt-build`.

@@ -16,7 +16,7 @@ from pipeline.quality.health import run_pipeline_health
 from pipeline.quality.integrity import run_integrity
 from pipeline.scheduler.dbt_runner import run_dbt_build
 from pipeline.scheduler.maintenance import MAINTENANCE_TABLES, run_maintenance
-from pipeline.scheduler.repair import run_dedup
+from pipeline.scheduler.repair import run_dedup, run_dedup_key
 
 logger = get_logger("scheduler")
 
@@ -49,7 +49,20 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--dedup-bronze",
         action="store_true",
-        help="one-time bronze dedup rewrite via Athena (stop consumers first)",
+        help="one-time bronze dedup rewrite via PyIceberg (stop consumers first)",
+    )
+    parser.add_argument(
+        "--dedup-days",
+        type=int,
+        default=None,
+        help="limit --dedup-bronze to the last N event days (default: whole table)",
+    )
+    parser.add_argument(
+        "--dedup-key",
+        action="append",
+        default=None,
+        metavar="SYMBOL:TRADE_ID",
+        help="repair one duplicate key (repeatable); rewrites only matching files",
     )
     parser.add_argument(
         "--integrity-only",
@@ -117,7 +130,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     settings = get_settings()
     configure_logging(settings.log_level)
     if args.dedup_bronze:
-        return 0 if run_dedup(settings).ok else 1
+        if args.dedup_key:
+            ok = all(run_dedup_key(settings, key).ok for key in args.dedup_key)
+            return 0 if ok else 1
+        return 0 if run_dedup(settings, days=args.dedup_days).ok else 1
     if args.integrity_only:
         return 0 if run_integrity(settings).ok else 1
     if args.health_only:

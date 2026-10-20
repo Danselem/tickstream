@@ -146,6 +146,17 @@ def _run_checkpoint(
         for result in validation_result.results:
             if not result.success and result.expectation_config is not None:
                 failed.append(result.expectation_config.type)
+                # Without the observed values a failure is undiagnosable from
+                # the structured log ("uniqueness failed" — how many, which?).
+                details = result.result or {}
+                logger.warning(
+                    "expectation_failed",
+                    expectation=result.expectation_config.type,
+                    column=result.expectation_config.kwargs.get("column"),
+                    element_count=details.get("element_count"),
+                    unexpected_count=details.get("unexpected_count"),
+                    partial_unexpected=details.get("partial_unexpected_list", [])[:3],
+                )
     return bool(outcome.success), failed
 
 

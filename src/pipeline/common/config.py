@@ -30,6 +30,9 @@ class Settings(BaseSettings):
     # tripped "keepalive ping timeout" (close 1011) on Docker-network hiccups.
     ws_ping_interval_s: int = 20
     ws_ping_timeout_s: int = 60
+    # Reconnect when the socket stays open but delivers nothing. Binance has
+    # left combined streams silent for hours while keepalive pings still ponged.
+    ws_stale_after_s: int = 60
 
     # Batching / scheduling
     batch_interval_s: int = 45

@@ -10,7 +10,9 @@
 }}
 
 -- Deduped, typed trades. Incremental MERGE on (symbol, trade_id); the 2-hour
--- lookback absorbs late arrivals and makes re-runs idempotent.
+-- lookback absorbs late arrivals and makes re-runs idempotent. Override the
+-- lookback (`--vars '{silver_lookback_hours: 120}'`) to repair an ingestion gap.
+{% set lookback_hours = var("silver_lookback_hours", 2) %}
 with ranked as (
     select
         symbol,
@@ -29,7 +31,7 @@ with ranked as (
     where event_time >= (
         select
             coalesce(
-                max(event_time) - interval '2' hour,
+                max(event_time) - interval '{{ lookback_hours }}' hour,
                 timestamp '1970-01-01 00:00:00'
             )
         from {{ this }}
