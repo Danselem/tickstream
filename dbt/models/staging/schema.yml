@@ -24,3 +24,19 @@ models:
         description: "Producer arrival time, UTC."
       - name: is_buyer_maker
         description: "True when the buyer was the maker."
+
+  - name: stg_klines
+    description: "Typed view over bronze_klines (archive 1m candles). No dedup."
+    columns:
+      - name: symbol
+        description: "Trading pair."
+        tests:
+          - not_null
+      - name: open_time
+        description: "Candle open time, UTC."
+        tests:
+          - not_null
+      - name: close
+        description: "Close price."
+        tests:
+          - not_null

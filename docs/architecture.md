@@ -12,7 +12,9 @@ flowchart LR
     SCHED -.->|every N cycles| INT[whole-table integrity<br/>duplicate keys, local scan<br/>→ integrity_results]
     INT -->|duplicates>0| BLOCK
     SCHED -.->|every N cycles| HLTH[lake health<br/>rows per layer + per-symbol<br/>freshness → layer_counts,<br/>symbol_freshness]
-    DBT --> SUP[Superset 6<br/>pyathena, REST-provisioned<br/>17 charts, published]
+    BIN -.->|archive 1m klines<br/>SHA256 + monthly/daily zips| BF[bronze_klines<br/>symbol partitions<br/>ADR-026]
+    BF -.-> DBT
+    DBT --> SUP[Superset 6<br/>pyathena, REST-provisioned<br/>18 charts, published]
     S3 --> SUP
     DBT -.->|OPTIMIZE + VACUUM| S3
 ```
@@ -50,18 +52,27 @@ flowchart LR
     skip rewrites) → `gold_candles_1m` (OHLC/volume/USD-notional/VWAP/trade_count/
      volatility, 30-min recompute) → `gold_market_summary_daily`/`_hourly`
      (per-symbol open/close/range/notional/%change from a shared macro) →
-     `dim_symbol`/`dim_time` views (ADR-019). 60+ tests, all columns documented.
+     `dim_symbol`/`dim_time` views (ADR-019). Archive klines run in parallel:
+     `stg_klines` → `silver_klines` → `gold_candles_1m_hist` (volatility NULL) and
+     the `gold_candles_1m_unified` view (live candle wins per minute, ADR-026).
+     90+ tests, all columns documented.
  6. **Serve.** Superset 6 (derived image + `pyathena[pandas]`, SQLite metadata on
-      a volume) provisioned by a REST script: Athena database, 8 datasets
-      (gold + 2 business summaries + 5 ops/health tables, never bronze), 17 charts
+      a volume) provisioned by a REST script: Athena database, 9 datasets
+      (gold, unified gold + 2 business summaries + 5 ops/health tables, never
+      bronze), 18 charts
       across two native tabs — **Market** (candlestick OHLC, price/VWAP, base
       volume, USD notional, trades/min, volatility, notional-share treemap, 2 KPI
       tiles, daily & hourly summary tables) and **Pipeline health** (lag, batch
       rows, quality runs, bronze integrity, rows per layer, per-symbol freshness).
-      Native **Symbol** and **Time range** filters (ADR-020); trailing-window time
-      ranges (ADR-022); all charts/labels defined in code (ADR-018). One published
-      dashboard.
- 7. **Maintain.** Every N scheduler cycles (and via `make maintenance`): Athena
+      Native **Symbol** (defaults to the first configured coin, BTC) and **Time
+      range** filters (ADR-020/027); 24 h detail + 30 d trend windows (ADR-022/027);
+      all charts/labels defined in code (ADR-018). One published dashboard.
+ 7. **Backfill.** `make backfill` downloads Binance's monthly (complete months)
+    and daily (partial month) 1m kline zips, verifies each SHA256 sidecar,
+    normalises microsecond timestamps to naive UTC, and replaces `bronze_klines`
+    in one commit (ADR-026). It is offline, idempotent (`--force`) and gated by
+    dbt tests (uniqueness, OHLC/volume bounds), not the live GX window.
+ 8. **Maintain.** Every N scheduler cycles (and via `make maintenance`): Athena
     `OPTIMIZE … REWRITE DATA USING BIN_PACK` + `VACUUM` on the Iceberg tables.
 
 ## Delivery semantics

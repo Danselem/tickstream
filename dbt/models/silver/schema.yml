@@ -43,3 +43,42 @@ models:
         description: "True when the buyer was the maker."
         tests:
           - not_null
+
+  - name: silver_klines
+    description: "Deduped archive 1m klines (one row per symbol + open_time). A view: the archive is static."
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns:
+            - symbol
+            - open_time
+    columns:
+      - name: symbol
+        description: "Trading pair."
+        tests:
+          - not_null
+      - name: open_time
+        description: "Candle open time, UTC."
+        tests:
+          - not_null
+      - name: high
+        description: "High price, >= low."
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: ">= low"
+      - name: low
+        description: "Low price, > 0."
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: "> 0"
+      - name: volume
+        description: "Base volume, non-negative."
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: ">= 0"
+      - name: trade_count
+        description: "Trades in the minute."
+        tests:
+          - not_null

@@ -11,7 +11,7 @@ BACKEND_CONFIG := $(INFRA_DIR)/backend.hcl
 
 ALERT_EMAIL ?= budget-alerts@example.com
 
-.PHONY: help install up down logs restart lint format typecheck test quality dbt-build dbt-refresh maintenance compact dedup-bronze integrity health superset infra-bootstrap infra-plan infra-apply
+.PHONY: help install up down logs restart lint format typecheck test quality dbt-build dbt-refresh backfill maintenance compact dedup-bronze integrity health superset infra-bootstrap infra-plan infra-apply
 
 help: ## Show targets
 	@grep -E '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS=":.*?## "} {printf "  %-16s %s\n", $$1, $$2}'
@@ -53,6 +53,13 @@ dbt-build: ## Run dbt deps + build (Phase 2+; scheduler runs this only after GE 
 
 dbt-refresh: ## dbt deps + full-refresh build (one-off: reconcile late-arriving bronze rows)
 	bash -c 'set -a; [ -f .env ] && source .env; set +a; $(UV) dbt deps --project-dir dbt --profiles-dir dbt && $(UV) dbt build --project-dir dbt --profiles-dir dbt --full-refresh'
+
+START ?=
+END ?=
+SYMBOLS ?=
+FORCE ?=
+backfill: ## Backfill 1m klines (START=YYYY-MM-DD END=YYYY-MM-DD SYMBOLS= FORCE=1)
+	$(UV) python -m pipeline.backfill $(if $(START),--start $(START),) $(if $(END),--end $(END),) $(if $(SYMBOLS),--symbols $(SYMBOLS),) $(if $(FORCE),--force,)
 
 # --quality-only skips dbt (this target only compacts); --maintenance runs after
 # a passing quality check. The scheduler loop itself calls run_once() with dbt.

@@ -474,3 +474,57 @@ Short records of each non-obvious choice: context, decision, consequence.
   Trade-off: 60 s of global silence is abnormal for 7 symbols (BTC/ETH trade
   every second); if a very quiet symbol set is ever configured, raise the
   threshold. Historical holes are repaired by the archive backfill, not by this.
+
+## ADR-026 — Archive 1m klines backfill for chart history (`bronze_klines`)
+
+- Context: the live pipeline only held ~2 days of usable candles (sparse, because
+  of the silent-WS gaps in ADR-025), so the 7 d/30 d charts were mostly empty and
+  a 1-minute series could not show a month of context. Binance publishes spot
+  `klines` archives (monthly for complete months, daily for the current month);
+  there is **no** historical depth/order-book archive, so klines are the only
+  cheap way to rebuild OHLCV.
+- Decision: a separate, offline backfill instead of replaying trades.
+  - `src/pipeline/backfill` downloads `data.binance.vision` zips for the
+    configured symbols, verifies each `.CHECKSUM` (SHA256), and turns the
+    headerless CSV into an Arrow/Iceberg table `bronze_klines` (symbol-partitioned;
+    one row per `(symbol, open_time)`, `source='archive'`). Spot archive
+    timestamps are **microseconds** since 2025-01 (13-digit ms handled too); they
+    are normalised to naive UTC, matching the live bronze contract.
+  - `make backfill` defaults to the first day of the month 60 days ago through
+    yesterday, all `TICKSTREAM_SYMBOLS`; `FORCE=1` replaces the table in one
+    commit (a normal re-run skips when rows exist, so a stray run cannot
+    duplicate history).
+  - dbt: `stg_klines` → `silver_klines` (view + `row_number` dedup) →
+    `gold_candles_1m_hist` (`volatility` is NULL; `vwap = quote_volume/volume`)
+    → `gold_candles_1m_unified` view: live candles win per minute, archive fills
+    the rest, with a `source` column (`live`/`kline`).
+  - The offline load is gated by the SHA256 sidecars plus dbt tests (unique
+    `(symbol, open_time)`, non-null/positive OHLC, `high >= low`, volume ≥ 0),
+    not by the live GX window (which stays scoped to the last successful gate).
+- Consequence: 806,400 candles (Aug 1–Oct 19 2026, 7 symbols) loaded in ~18 min;
+  the Market tab now has a real 30-day trend and dense 24 h detail, and today's
+  live tail wins over the archive when both exist. Trade-offs: the archive is
+  T+1 (today is live-only), `volatility` cannot be reconstructed from klines so
+  that chart stays on the live table, and XRP (dropped from config) has no
+  archive rows. Backfill is manual (`make backfill`), documented in the runbook.
+
+## ADR-027 — Readable default view: BTC, 24 h detail + 30 d trend
+
+- Context: the multi-symbol candlestick put coins with very different price
+  scales on one axis (unreadable), the 1 m charts defaulted to 7 days (too dense),
+  and 50-unit tiles with top legends/axis titles made labels collide with the
+  plot.
+- Decision:
+  - The native **Symbol** filter ships a `defaultDataMask` for the first
+    configured coin (`TICKSTREAM_SYMBOLS[0]`, BTC), so the dashboard opens on BTC;
+    multi-select stays available. The filter's value list comes from the unified
+    dataset, and it scopes every Market chart (`live` + `kline` datasets).
+  - Price/VWAP, base volume, USD notional, trades/min and the candlestick use the
+    **unified** dataset over the last **24 h at 1 m**; a new "price — 30d trend
+    (1h)" line uses `now-30d : now`. Volatility remains live-only.
+  - Chart tiles are 70 units (wide tables/candlestick) or 55 (others), with
+    `x_axis_title_margin=30`, `y_axis_title_margin=60` and `legendMargin=4`.
+- Consequence: the default screen is a readable BTC 24 h detail plus a 30 d trend,
+  and labels no longer sit on top of the plotted series. Trade-off: the default
+  coin is the first entry of `TICKSTREAM_SYMBOLS` (re-provision after reordering);
+  the 24 h detail still inherits live-ingestion gaps for the current day.

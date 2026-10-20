@@ -21,6 +21,7 @@ from typing import Any
 
 DATABASE_NAME = "tickstream_athena"
 GOLD_TABLE = "gold_candles_1m"
+UNIFIED_TABLE = "gold_candles_1m_unified"
 DAILY_SUMMARY_TABLE = "gold_market_summary_daily"
 HOURLY_SUMMARY_TABLE = "gold_market_summary_hourly"
 QUALITY_TABLE = "quality_results"
@@ -46,6 +47,7 @@ DATASET_TABLES = (
     INTEGRITY_TABLE,
     FRESHNESS_TABLE,
     LAYER_COUNTS_TABLE,
+    UNIFIED_TABLE,
 )
 
 # Trailing windows relative to "now". Superset's named presets ("Last day",
@@ -54,6 +56,8 @@ DATASET_TABLES = (
 # keeps the newest point in view.
 TIME_RANGE = "now-7d : now"
 SUMMARY_TIME_RANGE = "now-1d : now"
+DETAIL_TIME_RANGE = "now-1d : now"
+TREND_TIME_RANGE = "now-30d : now"
 
 # Friendly column headers (dataset `verbose_name`). Charts and tables that show
 # raw column names are unreadable to a business viewer, so every dataset gets
@@ -130,9 +134,7 @@ def athena_uri(
     )
 
 
-def adhoc_metric(
-    column: str, aggregate: str, *, label: str | None = None
-) -> dict[str, Any]:
+def adhoc_metric(column: str, aggregate: str, *, label: str | None = None) -> dict[str, Any]:
     """Minimal SIMPLE metric; Superset resolves the column against the dataset."""
     return {
         "label": label or f"{aggregate}({column})",
@@ -152,9 +154,7 @@ def adhoc_equals(column: str, value: str) -> dict[str, Any]:
     }
 
 
-def _base_params(
-    dataset_id: int, viz_type: str, *, time_range: str = TIME_RANGE
-) -> dict[str, Any]:
+def _base_params(dataset_id: int, viz_type: str, *, time_range: str = TIME_RANGE) -> dict[str, Any]:
     return {
         "datasource": f"{dataset_id}__table",
         "viz_type": viz_type,
@@ -189,6 +189,11 @@ def timeseries_params(
     params["show_legend"] = True
     params["legendType"] = "scroll"
     params["legendOrientation"] = "top"
+    params["legendMargin"] = 4
+    # Explicit margins keep the axis titles outside the plot (the Oct 2026
+    # complaint: titles/legend overlapped the plotted data on short tiles).
+    params["x_axis_title_margin"] = 30
+    params["y_axis_title_margin"] = 60
     params["rich_tooltip"] = True
     params["tooltipTimeFormat"] = "%Y-%m-%d %H:%M"
     if x_axis_title:
@@ -254,6 +259,10 @@ def candlestick_params(
     params["show_x_axis"] = True
     params["show_y_axis"] = True
     params["x_axis_time_format"] = "%H:%M"
+    params["x_axis_title_margin"] = 30
+    params["y_axis_title_margin"] = 60
+    params["legendMargin"] = 4
+    params["legendOrientation"] = "top"
     params["color_by_direction"] = True
     params["series_style"] = "candlestick"
     if series:
@@ -347,9 +356,10 @@ def chart_specs(symbols: list[str]) -> list[ChartSpec]:
             name=f"{prefix}price — close vs VWAP (1m)",
             tab=TAB_MARKET,
             viz_type="echarts_timeseries_line",
-            dataset=GOLD_TABLE,
+            dataset=UNIFIED_TABLE,
             x_axis_title="Time (UTC)",
             y_axis_title="Price (USDT)",
+            time_range=DETAIL_TIME_RANGE,
             params={
                 "x_axis": "candle_start",
                 "time_grain_sqla": "PT1M",
@@ -362,9 +372,10 @@ def chart_specs(symbols: list[str]) -> list[ChartSpec]:
             name=f"{prefix}base volume (1m)",
             tab=TAB_MARKET,
             viz_type="echarts_timeseries_bar",
-            dataset=GOLD_TABLE,
+            dataset=UNIFIED_TABLE,
             x_axis_title="Time (UTC)",
             y_axis_title="Volume (base asset)",
+            time_range=DETAIL_TIME_RANGE,
             params={
                 "x_axis": "candle_start",
                 "time_grain_sqla": "PT1M",
@@ -377,9 +388,10 @@ def chart_specs(symbols: list[str]) -> list[ChartSpec]:
             name=f"{prefix}USD notional traded (1m)",
             tab=TAB_MARKET,
             viz_type="echarts_timeseries_bar",
-            dataset=GOLD_TABLE,
+            dataset=UNIFIED_TABLE,
             x_axis_title="Time (UTC)",
             y_axis_title="Notional (USD)",
+            time_range=DETAIL_TIME_RANGE,
             params={
                 "x_axis": "candle_start",
                 "time_grain_sqla": "PT1M",
@@ -392,9 +404,10 @@ def chart_specs(symbols: list[str]) -> list[ChartSpec]:
             name=f"{prefix}trades per minute (1m)",
             tab=TAB_MARKET,
             viz_type="echarts_timeseries_line",
-            dataset=GOLD_TABLE,
+            dataset=UNIFIED_TABLE,
             x_axis_title="Time (UTC)",
             y_axis_title="Trades per minute",
+            time_range=DETAIL_TIME_RANGE,
             params={
                 "x_axis": "candle_start",
                 "time_grain_sqla": "PT1M",
@@ -410,6 +423,7 @@ def chart_specs(symbols: list[str]) -> list[ChartSpec]:
             dataset=GOLD_TABLE,
             x_axis_title="Time (UTC)",
             y_axis_title="Volatility (log-return stddev)",
+            time_range=DETAIL_TIME_RANGE,
             params={
                 "x_axis": "candle_start",
                 "time_grain_sqla": "PT1M",
@@ -422,8 +436,9 @@ def chart_specs(symbols: list[str]) -> list[ChartSpec]:
             name=f"{prefix}price — candlestick (1m)",
             tab=TAB_MARKET,
             viz_type="candlestick",
-            dataset=GOLD_TABLE,
+            dataset=UNIFIED_TABLE,
             wide=True,
+            time_range=DETAIL_TIME_RANGE,
             params={
                 "x_axis": "candle_start",
                 "time_grain_sqla": "PT1M",
@@ -434,6 +449,24 @@ def chart_specs(symbols: list[str]) -> list[ChartSpec]:
                 "series": "symbol" if groupby else None,
                 "filters": coin,
                 "y_axis_format": ",.4f",
+            },
+        ),
+        ChartSpec(
+            name=f"{prefix}price — 30d trend (1h)",
+            tab=TAB_MARKET,
+            viz_type="echarts_timeseries_line",
+            dataset=UNIFIED_TABLE,
+            x_axis_title="Time (UTC)",
+            y_axis_title="Price (USDT)",
+            x_axis_time_format="%m-%d",
+            time_range=TREND_TIME_RANGE,
+            params={
+                "x_axis": "candle_start",
+                "time_grain_sqla": "PT1H",
+                "metrics": [adhoc_metric("close", "AVG")],
+                "y_axis_format": ",.2f",
+                "row_limit": 20000,
+                **view,
             },
         ),
         ChartSpec(
@@ -723,7 +756,7 @@ def dashboard_layout(
                     "id": key,
                     "meta": {
                         "chartId": chart_id,
-                        "height": 50,
+                        "height": 70 if wide else 55,
                         "sliceName": {"value": name},
                         "width": 12 if wide else 6,
                     },
@@ -769,6 +802,7 @@ def native_filter_configuration(
     all_chart_ids: list[int],
     market_tab: str,
     health_tab: str,
+    default_symbol: str | None = None,
 ) -> list[dict[str, Any]]:
     """Dashboard-level native filters: a Symbol selector (Market candles) and a
     global Time range.
@@ -776,6 +810,17 @@ def native_filter_configuration(
     Filter targets reference datasets by **uuid** (the API list exposes ``id``,
     but native-filter targets need the uuid), so the caller passes it in.
     """
+    default_mask: dict[str, Any] = {
+        "extraFormData": {},
+        "filterState": {},
+        "ownState": {},
+    }
+    if default_symbol:
+        default_mask = {
+            "extraFormData": {"filters": [{"col": "symbol", "op": "IN", "val": [default_symbol]}]},
+            "filterState": {"label": default_symbol, "value": [default_symbol]},
+            "ownState": {},
+        }
     return [
         {
             "id": "NATIVE_FILTER-symbol",
@@ -794,11 +839,7 @@ def native_filter_configuration(
                 "searchAllOptions": False,
                 "inverseSelection": False,
             },
-            "defaultDataMask": {
-                "extraFormData": {},
-                "filterState": {},
-                "ownState": {},
-            },
+            "defaultDataMask": default_mask,
             "cascadeParentIds": [],
             "scope": {"rootPath": ["ROOT_ID"], "excluded": []},
             "type": "NATIVE_FILTER",
@@ -848,13 +889,9 @@ class Api:
         self._opener = opener
 
     # -- low level --------------------------------------------------------
-    def _request(
-        self, method: str, path: str, body: dict[str, Any] | None = None
-    ) -> Any:
+    def _request(self, method: str, path: str, body: dict[str, Any] | None = None) -> Any:
         data = json.dumps(body).encode() if body is not None else None
-        request = urllib.request.Request(
-            self.base_url + path, data=data, method=method.upper()
-        )
+        request = urllib.request.Request(self.base_url + path, data=data, method=method.upper())
         request.add_header("Content-Type", "application/json")
         if self.token:
             request.add_header("Authorization", f"Bearer {self.token}")
@@ -880,12 +917,8 @@ class Api:
         self.csrf_token = csrf["result"]
 
     def _find(self, resource: str, column: str, value: str) -> dict[str, Any] | None:
-        query = json.dumps(
-            {"filters": [{"col": column, "opr": "eq", "value": value}]}
-        )
-        result = self._request(
-            "GET", f"/api/v1/{resource}/?q={urllib.parse.quote(query)}"
-        )
+        query = json.dumps({"filters": [{"col": column, "opr": "eq", "value": value}]})
+        result = self._request("GET", f"/api/v1/{resource}/?q={urllib.parse.quote(query)}")
         items = result.get("result", [])
         return items[0] if items else None
 
@@ -960,9 +993,7 @@ class Api:
                 item["type"] = column["type"]
             payload.append(item)
         if payload:
-            self._request(
-                "PUT", f"/api/v1/dataset/{dataset_id}", {"columns": payload}
-            )
+            self._request("PUT", f"/api/v1/dataset/{dataset_id}", {"columns": payload})
 
     def _all_charts(self) -> list[dict[str, Any]]:
         result = self._request("GET", "/api/v1/chart/")
@@ -1063,9 +1094,7 @@ def main() -> None:
 
     db_id = api.ensure_database(DATABASE_NAME, uri)
     schema = _env("TICKSTREAM_GLUE_DATABASE")
-    dataset_ids = {
-        table: api.ensure_dataset(db_id, schema, table) for table in DATASET_TABLES
-    }
+    dataset_ids = {table: api.ensure_dataset(db_id, schema, table) for table in DATASET_TABLES}
     for dataset_id in dataset_ids.values():
         api.label_columns(dataset_id, COLUMN_LABELS)
 
@@ -1078,19 +1107,20 @@ def main() -> None:
         chart_id = api.ensure_chart(spec.name, spec.viz_type, dataset_id, params)
         placed[spec.tab].append((chart_id, spec.name, spec.wide))
         all_chart_ids.append(chart_id)
-        if spec.dataset == GOLD_TABLE:
+        if spec.dataset in (GOLD_TABLE, UNIFIED_TABLE):
             gold_chart_ids.append(chart_id)
         print(f"chart ready: {spec.name} (id={chart_id})", flush=True)
 
-    gold_uuid = api.get_dataset(dataset_ids[GOLD_TABLE]).get("uuid")
-    if not isinstance(gold_uuid, str) or not gold_uuid:
-        raise ProvisionError("gold_candles_1m dataset has no uuid; cannot target filters")
+    symbol_uuid = api.get_dataset(dataset_ids[UNIFIED_TABLE]).get("uuid")
+    if not isinstance(symbol_uuid, str) or not symbol_uuid:
+        raise ProvisionError("gold_candles_1m_unified dataset has no uuid; cannot target filters")
     filters = native_filter_configuration(
-        symbol_dataset_uuid=gold_uuid,
+        symbol_dataset_uuid=symbol_uuid,
         gold_chart_ids=gold_chart_ids,
         all_chart_ids=all_chart_ids,
         market_tab=tab_key(TAB_MARKET),
         health_tab=tab_key(TAB_HEALTH),
+        default_symbol=symbols[0],
     )
 
     tabs = [(tab, placed[tab]) for tab in TAB_ORDER if placed[tab]]

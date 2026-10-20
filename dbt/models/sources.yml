@@ -27,3 +27,32 @@ sources:
             description: "Producer arrival time, UTC."
           - name: is_buyer_maker
             description: "True when the buyer was the maker (Binance `m`)."
+      - name: bronze_klines
+        description: "Archive 1m klines (Aug 2026+ backfill), one row per symbol + open_time. Never modified."
+        columns:
+          - name: symbol
+            description: "Trading pair."
+          - name: open_time
+            description: "Candle open time, UTC (archive microseconds normalised)."
+          - name: open
+            description: "Open price."
+          - name: high
+            description: "High price."
+          - name: low
+            description: "Low price."
+          - name: close
+            description: "Close price."
+          - name: volume
+            description: "Base-asset volume."
+          - name: quote_volume
+            description: "Quote-asset (USDT) volume."
+          - name: trade_count
+            description: "Trades in the minute."
+          - name: taker_buy_base_volume
+            description: "Taker-buy base volume."
+          - name: taker_buy_quote_volume
+            description: "Taker-buy quote volume."
+          - name: ingest_time
+            description: "Backfill write time, UTC."
+          - name: source
+            description: "Archive source label (archive)."

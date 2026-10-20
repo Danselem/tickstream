@@ -58,10 +58,11 @@ def test_adhoc_builders_shape() -> None:
 
 def test_chart_specs_cover_both_tabs() -> None:
     specs = chart_specs(["XRPUSDT"])
-    assert len(specs) == 17
+    assert len(specs) == 18
     assert {spec.tab for spec in specs} == {provision.TAB_MARKET, provision.TAB_HEALTH}
     assert {spec.dataset for spec in specs} == {
         provision.GOLD_TABLE,
+        provision.UNIFIED_TABLE,
         provision.DAILY_SUMMARY_TABLE,
         provision.HOURLY_SUMMARY_TABLE,
         provision.QUALITY_TABLE,
@@ -73,7 +74,7 @@ def test_chart_specs_cover_both_tabs() -> None:
     # Market tab is business-facing; pipeline health tab is the ops view.
     market = [spec for spec in specs if spec.tab == provision.TAB_MARKET]
     health = [spec for spec in specs if spec.tab == provision.TAB_HEALTH]
-    assert len(market) == 11 and len(health) == 6
+    assert len(market) == 12 and len(health) == 6
     # The candlestick and the two summary tables span a full row.
     wide = [spec.name for spec in market if spec.wide]
     assert wide == [
@@ -82,7 +83,12 @@ def test_chart_specs_cover_both_tabs() -> None:
         "Market summary — hourly (last 24h)",
     ]
     # Summary/KPI charts use a 24h trailing window; everything else 7d.
-    summary = {spec.name for spec in specs if spec.time_range == provision.SUMMARY_TIME_RANGE}
+    summary = {
+        spec.name
+        for spec in specs
+        if spec.time_range == provision.SUMMARY_TIME_RANGE
+        and spec.dataset in (provision.DAILY_SUMMARY_TABLE, provision.HOURLY_SUMMARY_TABLE)
+    }
     assert summary == {
         "Market summary — last 24h (UTC)",
         "Market summary — hourly (last 24h)",
@@ -102,9 +108,11 @@ def test_chart_specs_single_symbol_filters() -> None:
 
 def test_chart_specs_multi_symbol_groups_by_symbol() -> None:
     specs = chart_specs(["BTCUSDT", "ETHUSDT"])
-    assert len(specs) == 17
-    coin_specs = [spec for spec in specs if spec.dataset == provision.GOLD_TABLE]
-    assert len(coin_specs) == 6
+    assert len(specs) == 18
+    coin_specs = [
+        spec for spec in specs if spec.dataset in (provision.GOLD_TABLE, provision.UNIFIED_TABLE)
+    ]
+    assert len(coin_specs) == 7
     for spec in coin_specs:
         params = chart_params(spec, 9)
         if spec.viz_type == "candlestick":
@@ -139,13 +147,15 @@ def test_chart_params_renders_table_and_timeseries() -> None:
 def test_timeseries_params_carry_labels_and_legend() -> None:
     """Readability: axis titles, legend and time format must be explicit."""
     specs = chart_specs(["XRPUSDT"])
-    price = next(spec for spec in specs if spec.dataset == provision.GOLD_TABLE)
+    price = next(spec for spec in specs if spec.dataset == provision.UNIFIED_TABLE)
     params = chart_params(price, 9)
     assert params["x_axis_title"] == "Time (UTC)"
     assert params["y_axis_title"] == "Price (USDT)"
     assert params["show_legend"] is True
     assert params["legendType"] == "scroll"
     assert params["x_axis_time_format"] == "%H:%M"
+    assert params["x_axis_title_margin"] == 30
+    assert params["y_axis_title_margin"] == 60
     assert params["rich_tooltip"] is True
     assert params["color_scheme"] == "supersetColors"
 
@@ -175,6 +185,7 @@ def test_candlestick_params_shape() -> None:
     assert params["low"]["aggregate"] == "MIN"
     assert params["series"] == "symbol"
     assert params["show_x_axis"] is True and params["show_y_axis"] is True
+    assert params["x_axis_title_margin"] == 30
 
 
 def test_treemap_and_big_number_params_shape() -> None:
@@ -183,9 +194,7 @@ def test_treemap_and_big_number_params_shape() -> None:
     assert tree["groupby"] == ["symbol"]
     assert tree["sort_by_metric"] is True
 
-    big = big_number_params(
-        2, metric=adhoc_metric("notional", "SUM"), y_axis_format="$,.0f"
-    )
+    big = big_number_params(2, metric=adhoc_metric("notional", "SUM"), y_axis_format="$,.0f")
     assert big["viz_type"] == "big_number_total"
     assert big["metric"]["label"] == "SUM(notional)"
 
@@ -201,9 +210,7 @@ def test_native_filter_configuration_targets_and_scope() -> None:
     by_id = {flt["id"]: flt for flt in filters}
     symbol = by_id["NATIVE_FILTER-symbol"]
     assert symbol["filterType"] == "filter_select"
-    assert symbol["targets"] == [
-        {"column": {"name": "symbol"}, "datasetUuid": "uuid-1"}
-    ]
+    assert symbol["targets"] == [{"column": {"name": "symbol"}, "datasetUuid": "uuid-1"}]
     assert symbol["chartsInScope"] == [1, 2, 6]
     assert symbol["tabsInScope"] == ["TAB-Market"]
     time = by_id["NATIVE_FILTER-time"]
@@ -290,9 +297,7 @@ class FakeTransport:
         self.routes = routes
         self.calls: list[tuple[str, str, Any]] = []
 
-    def open(
-        self, request: urllib.request.Request, timeout: float = 60
-    ) -> FakeResponse:
+    def open(self, request: urllib.request.Request, timeout: float = 60) -> FakeResponse:
         assert isinstance(request, urllib.request.Request)
         assert request.data is None or isinstance(request.data, bytes)
         body = json.loads(request.data.decode()) if request.data else None
@@ -353,9 +358,7 @@ def test_ensure_chart_and_dashboard_create_path() -> None:
     # Create alone does not link charts; a follow-up PUT carries the layout so
     # set_dash_metadata populates dashboard_slices.
     put = next(call for call in transport.calls if call[0] == "PUT")
-    assert json.loads(put[2]["json_metadata"])["positions"]["CHART-11"]["meta"][
-        "chartId"
-    ] == 11
+    assert json.loads(put[2]["json_metadata"])["positions"]["CHART-11"]["meta"]["chartId"] == 11
 
 
 def test_ensure_chart_finds_name_with_plus_without_duplicating() -> None:
@@ -412,3 +415,30 @@ def test_provision_module_imports_without_requests() -> None:
     with open(provision.__file__, encoding="utf-8") as fh:
         source = fh.read()
     assert "import requests" not in source
+
+
+def test_native_filter_defaults_to_btc() -> None:
+    filters = native_filter_configuration(
+        symbol_dataset_uuid="uuid-1",
+        gold_chart_ids=[1],
+        all_chart_ids=[1],
+        market_tab="TAB-Market",
+        health_tab="TAB-Pipeline-health",
+        default_symbol="BTCUSDT",
+    )
+    symbol = next(f for f in filters if f["id"] == "NATIVE_FILTER-symbol")
+    assert symbol["defaultDataMask"]["filterState"]["value"] == ["BTCUSDT"]
+    assert symbol["defaultDataMask"]["extraFormData"]["filters"] == [
+        {"col": "symbol", "op": "IN", "val": ["BTCUSDT"]}
+    ]
+
+
+def test_market_charts_use_detail_and_trend_windows() -> None:
+    specs = chart_specs(["BTCUSDT"])
+    trend = next(spec for spec in specs if "30d trend" in spec.name)
+    assert trend.dataset == provision.UNIFIED_TABLE
+    assert trend.time_range == provision.TREND_TIME_RANGE
+    detail = [spec for spec in specs if spec.dataset == provision.UNIFIED_TABLE]
+    assert len(detail) == 6
+    for spec in detail:
+        assert spec.time_range in (provision.DETAIL_TIME_RANGE, provision.TREND_TIME_RANGE)

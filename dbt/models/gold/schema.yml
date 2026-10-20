@@ -213,3 +213,36 @@ models:
         description: "Day of week (Mon..Sun)."
       - name: hour_of_day
         description: "Hour of day 0-23."
+
+  - name: gold_candles_1m_hist
+    description: "Historical 1m candles rebuilt from archive klines; volatility is NULL (ADR-026)."
+    columns:
+      - name: candle_start
+        description: "Minute bucket start, UTC."
+        tests:
+          - not_null
+      - name: vwap
+        description: "Quote volume / base volume."
+      - name: source
+        description: "Always 'kline'."
+        tests:
+          - not_null
+
+  - name: gold_candles_1m_unified
+    description: "Chart series: live trade-built candles win, archive klines fill the rest (ADR-026)."
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns:
+            - symbol
+            - candle_start
+    columns:
+      - name: candle_start
+        description: "Minute bucket start, UTC."
+        tests:
+          - not_null
+      - name: source
+        description: "live or kline."
+        tests:
+          - not_null
+          - accepted_values:
+              values: ["live", "kline"]

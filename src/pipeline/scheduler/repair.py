@@ -64,9 +64,7 @@ def dedup_arrow(arrow: pa.Table) -> pa.Table:
     return pa.Table.from_pandas(frame, schema=arrow.schema, preserve_index=False)
 
 
-def dedup_table(
-    table: Table, row_filter: BooleanExpression | None = None
-) -> tuple[int, int]:
+def dedup_table(table: Table, row_filter: BooleanExpression | None = None) -> tuple[int, int]:
     """Dedup an Iceberg table (optionally a time scope). Returns (before, after).
 
     A scoped rewrite (`row_filter`) avoids rewriting the whole table for a single
@@ -111,9 +109,7 @@ def dedup_key(table: Table, symbol: str, trade_id: int) -> tuple[int, int]:
     return before, after
 
 
-def run_dedup_key(
-    settings: Settings, raw_key: str, table_name: str = BRONZE_TABLE
-) -> DedupOutcome:
+def run_dedup_key(settings: Settings, raw_key: str, table_name: str = BRONZE_TABLE) -> DedupOutcome:
     """Repair a single ``SYMBOL:TRADE_ID`` duplicate. Returns the outcome; never raises."""
     try:
         symbol, trade_id = parse_key(raw_key)
@@ -143,9 +139,7 @@ def run_dedup(
     scope for a rebalance incident); ``None`` rewrites the whole table.
     """
     since = (
-        datetime.now(UTC).replace(tzinfo=None) - timedelta(days=days)
-        if days is not None
-        else None
+        datetime.now(UTC).replace(tzinfo=None) - timedelta(days=days) if days is not None else None
     )
     row_filter: BooleanExpression = (
         GreaterThanOrEqual(term=Reference("event_time"), value=literal(since))

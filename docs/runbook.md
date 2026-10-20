@@ -114,3 +114,17 @@ miss duplicates outside its window.
 `tofu destroy` inside `infra/` — **approval required** (AGENTS.md safety rules). Empty
 the lake bucket first (`force_destroy = false` blocks destroying a non-empty bucket).
 `docker compose down -v` removes local volumes (Kafka data, Superset metadata).
+
+## Kline backfill (history for charts, ADR-026)
+
+1. `make backfill` — defaults to the first day of the month 60 days ago through
+   yesterday, for every `TICKSTREAM_SYMBOLS` entry. Narrow it with
+   `START=2026-08-01 END=2026-10-19 SYMBOLS=BTCUSDT`.
+2. Re-running replaces the whole table only with `FORCE=1` (otherwise it skips
+   when rows exist, so an accidental run cannot duplicate history).
+3. Then `make dbt-build` (creates `silver_klines`, `gold_candles_1m_hist`, the
+   `gold_candles_1m_unified` view and runs the kline tests) and
+   `make superset` (dataset/charts). Verify in Athena:
+   `SELECT source, count(*) FROM gold_candles_1m_unified WHERE symbol='BTCUSDT' GROUP BY 1`.
+4. Failures are usually a missing daily file (T+1) or a checksum mismatch; the
+   log names the URL. Today's UTC day is live-only until tomorrow's archive.
