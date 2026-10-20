@@ -7,10 +7,10 @@ from confluent_kafka import Consumer, TopicPartition
 
 from pipeline.common.config import get_settings
 from pipeline.common.logging import configure_logging, get_logger
-from pipeline.common.models import BatchReport, TradeEvent
+from pipeline.common.models import BatchReport, TickerEvent, TradeEvent
 from pipeline.common.retry import with_transient_retry
-from pipeline.consumer.batcher import TradeBatcher
-from pipeline.consumer.bronze_writer import BronzeWriter
+from pipeline.consumer.batcher import Batcher
+from pipeline.consumer.bronze_writer import BronzeWriter, TickerWriter
 from pipeline.consumer.kafka_consumer import build_consumer
 from pipeline.consumer.metrics import consumer_lag
 from pipeline.consumer.ops_writer import OpsWriter
@@ -18,17 +18,29 @@ from pipeline.consumer.ops_writer import OpsWriter
 logger = get_logger("consumer")
 
 
-def main() -> None:
+def main(stream: str = "trades") -> None:
     """Poll, micro-batch, upsert, commit. Crash-safe: offsets commit only after writes."""
     settings = get_settings()
     configure_logging(settings.log_level)
+    ticker = stream == "ticker"
+    topic = settings.ticker_topic if ticker else settings.topic
+    group = settings.ticker_consumer_group if ticker else settings.consumer_group
+    model: type[TradeEvent] | type[TickerEvent] = TickerEvent if ticker else TradeEvent
     # Table bootstrap does S3/Glue I/O: same transient handling as writes.
-    writer = with_transient_retry(
-        lambda: BronzeWriter(settings), action="bronze_ensure"
-    )
+    writer: BronzeWriter | TickerWriter
+    if ticker:
+        writer = with_transient_retry(
+            lambda: TickerWriter(settings), action="ticker_bronze_ensure"
+        )
+    else:
+        writer = with_transient_retry(
+            lambda: BronzeWriter(settings), action="bronze_ensure"
+        )
     ops = with_transient_retry(lambda: OpsWriter(settings), action="ops_ensure")
-    consumer = build_consumer(settings)
-    batcher = TradeBatcher(settings.batch_max_rows, float(settings.batch_interval_s))
+    consumer = build_consumer(settings, topic=topic, group=group)
+    batcher: Batcher[TradeEvent] | Batcher[TickerEvent] = Batcher(
+        settings.batch_max_rows, float(settings.batch_interval_s)
+    )
 
     running = True
 
@@ -41,7 +53,7 @@ def main() -> None:
         if not batch:
             return
         started = time.monotonic()
-        writer.write(batch)  # raises on failure -> no commit -> replay absorbs it
+        writer.write(batch)  # type: ignore[arg-type]
         consumer.commit(asynchronous=False)
         # Start the next window only AFTER the flush: if write+commit+metrics
         # outruns batch_interval_s, the next batch must still get a full window
@@ -86,10 +98,8 @@ def main() -> None:
         logger.error("partitions_lost", partitions=[p.partition for p in partitions])
         running = False
 
-    consumer.subscribe(
-        [settings.topic], on_revoke=_on_revoke, on_lost=_on_lost
-    )
-    logger.info("consumer_started", topic=settings.topic, group=settings.consumer_group)
+    consumer.subscribe([topic], on_revoke=_on_revoke, on_lost=_on_lost)
+    logger.info("consumer_started", stream=stream, topic=topic, group=group)
 
     signal.signal(signal.SIGTERM, _stop)
     signal.signal(signal.SIGINT, _stop)
@@ -107,7 +117,7 @@ def main() -> None:
         if value is None:
             continue
         try:
-            batcher.add(TradeEvent.model_validate_json(value))
+            batcher.add(model.model_validate_json(value))  # type: ignore[arg-type]
         except ValueError as exc:
             logger.warning("dropping_malformed_event", error=str(exc))
             continue

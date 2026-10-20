@@ -44,6 +44,19 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  ticker-producer:
+    build: .
+    container_name: tickstream-ticker-producer
+    command: ["python", "-m", "pipeline.producer.ticker"]
+    env_file: [".env"]
+    environment:
+      TICKSTREAM_KAFKA_BOOTSTRAP: kafka:19092
+      AWS_REGION: ${TICKSTREAM_AWS_REGION:-us-east-1}
+    depends_on:
+      kafka:
+        condition: service_healthy
+    restart: unless-stopped
+
   consumer:
     build: .
     # No container_name: scaling needs Compose-managed names (tickstream-consumer-N).
@@ -51,6 +64,20 @@ services:
     command: ["python", "-m", "pipeline.consumer"]
     deploy:
       replicas: 3
+    env_file: [".env"]
+    environment:
+      TICKSTREAM_KAFKA_BOOTSTRAP: kafka:19092
+      AWS_REGION: ${TICKSTREAM_AWS_REGION:-us-east-1}
+    depends_on:
+      kafka:
+        condition: service_healthy
+    restart: unless-stopped
+
+  ticker-consumer:
+    build: .
+    container_name: tickstream-ticker-consumer
+    # 1 Hz per symbol: one replica drains all 3 partitions easily.
+    command: ["python", "-m", "pipeline.consumer.ticker"]
     env_file: [".env"]
     environment:
       TICKSTREAM_KAFKA_BOOTSTRAP: kafka:19092

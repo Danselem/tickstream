@@ -548,3 +548,29 @@ Short records of each non-obvious choice: context, decision, consequence.
   late, so a one-off silver/gold catch-up with wider lookbacks is needed
   afterwards. The map is volume-dependent: revisit it when the symbol mix or
   trade rates change materially (and before adding the `@ticker` stream).
+
+## ADR-029 — Separate `@ticker` stream for top-of-book microstructure
+
+- Context: trades only show executed price/size; they cannot measure quoted
+  spread, displayed depth or book imbalance. Binance's `@ticker` stream gives a
+  1 Hz snapshot of best bid/ask (`b/B/a/A`), last trade (`c/Q`) and rolling 24 h
+  stats for every symbol on the same market-data mirror.
+- Decision: keep it off the trade hot path.
+  - A second producer process (`ticker-producer`) opens its own combined
+    `<symbol>@ticker` connection and writes `ticker.raw` (3 partitions,
+    key=symbol). A second consumer (`ticker-consumer`, one replica — ~7 msg/s)
+    MERGEs into `bronze_tickers`, partitioned by event day + symbol and
+    idempotent on `(symbol, event_time)`.
+  - The GX gate validates the ticker table over the same window (unique
+    symbol+time, positive quote prices, freshness) and any failure blocks dbt,
+    exactly like trades. The table is skipped only if it does not exist yet.
+  - dbt: `stg_tickers` → `silver_tickers` (2 h lookback) →
+    `gold_market_microstructure_1m` (1-minute avg spread bps, mid, displayed
+    bid/ask quantity, imbalance in [-1, 1], last price, snapshot count; 30-min
+    recompute). Two charts on the Market tab, scoped by the Symbol filter.
+- Consequence: quoted spread/depth are queryable next to realized prices with
+  negligible load (7 msg/s, ~460-row batches, ~11 s commits). The trade
+  producer's reconnect/partition logic is untouched. Trade-off: a snapshot is
+  keyed to the event second, so two updates within the same millisecond would
+  collapse; Binance emits at most one per second per symbol. `@ticker` is a
+  1 Hz sample, not a full book — depth beyond the top level is out of scope.

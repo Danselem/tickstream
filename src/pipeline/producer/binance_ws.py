@@ -43,19 +43,20 @@ async def _recv(ws: Any, stale_after_s: float) -> Any:
         raise StaleStreamError(f"no message for {stale_after_s}s") from exc
 
 
-def stream_url(settings: Settings) -> str:
-    """Combined trade-stream URL for every configured symbol (stream names are lowercase)."""
-    streams = "/".join(f"{symbol.lower()}@trade" for symbol in settings.symbols)
+def stream_url(settings: Settings, suffix: str = "trade") -> str:
+    """Combined-stream URL for every configured symbol (`trade` or `ticker`)."""
+    streams = "/".join(f"{symbol.lower()}@{suffix}" for symbol in settings.symbols)
     return f"{settings.binance_ws_url}/stream?streams={streams}"
 
 
-async def stream_trades(
+async def stream_payloads(
     settings: Settings,
+    suffix: str,
     on_message: Callable[[dict[str, Any]], None],
     stop: asyncio.Event,
 ) -> None:
-    """Connect, invoke `on_message` per trade payload, reconnect forever until `stop`."""
-    url = stream_url(settings)
+    """Connect, invoke `on_message` per payload, reconnect forever until `stop`."""
+    url = stream_url(settings, suffix)
     backoff_s = 1.0
     total = 0
     while not stop.is_set():
@@ -81,6 +82,7 @@ async def stream_trades(
                     if now - window_start >= THROUGHPUT_WINDOW_S:
                         logger.info(
                             "ws_throughput",
+                            stream=suffix,
                             rate_per_s=round(window / (now - window_start), 1),
                             total=total,
                         )
@@ -104,3 +106,21 @@ async def stream_trades(
         except TimeoutError:
             pass
         backoff_s = min(backoff_s * 2, MAX_BACKOFF_S)
+
+
+async def stream_trades(
+    settings: Settings,
+    on_message: Callable[[dict[str, Any]], None],
+    stop: asyncio.Event,
+) -> None:
+    """Connect, invoke `on_message` per trade payload, reconnect forever until `stop`."""
+    await stream_payloads(settings, "trade", on_message, stop)
+
+
+async def stream_tickers(
+    settings: Settings,
+    on_message: Callable[[dict[str, Any]], None],
+    stop: asyncio.Event,
+) -> None:
+    """Connect, invoke `on_message` per 1 Hz ticker payload until `stop`."""
+    await stream_payloads(settings, "ticker", on_message, stop)

@@ -5,7 +5,7 @@ from decimal import Decimal
 
 import pytest
 
-from pipeline.common.models import TradeEvent
+from pipeline.common.models import TickerEvent, TradeEvent
 
 RAW_TRADE = {
     "e": "trade",
@@ -67,3 +67,48 @@ def test_naive_datetimes_are_treated_as_utc() -> None:
     )
     assert event.event_time.tzinfo == UTC
     assert event.ingest_time.tzinfo == UTC
+
+
+RAW_TICKER = {
+    "e": "24hrTicker",
+    "E": 1710000000456,
+    "s": "xrpusdt",
+    "p": "0.0012",
+    "P": "0.23",
+    "w": "0.521",
+    "c": "0.5230",
+    "Q": "10.5",
+    "b": "0.5229",
+    "B": "1200",
+    "a": "0.5231",
+    "A": "900",
+    "o": "0.5218",
+    "h": "0.5300",
+    "l": "0.5150",
+    "v": "125000.5",
+    "q": "65123.4",
+    "n": 4321,
+}
+
+
+def test_ticker_payload_maps_all_fields() -> None:
+    event = TickerEvent.from_binance_payload(RAW_TICKER, INGEST_TIME)
+    assert event.symbol == "XRPUSDT"
+    assert event.last_price == Decimal("0.5230")
+    assert event.bid_price == Decimal("0.5229")
+    assert event.ask_price == Decimal("0.5231")
+    assert event.ask_quantity == Decimal("900")
+    assert event.trade_count_24h == 4321
+    assert event.event_time == datetime.fromtimestamp(1710000000.456, tz=UTC)
+
+
+def test_ticker_payload_unwraps_combined_stream() -> None:
+    event = TickerEvent.from_binance_payload(
+        {"stream": "xrpusdt@ticker", "data": RAW_TICKER}, INGEST_TIME
+    )
+    assert event.symbol == "XRPUSDT"
+
+
+def test_ticker_rejects_non_positive_bid() -> None:
+    with pytest.raises(ValueError, match="bid_price"):
+        TickerEvent.from_binance_payload({**RAW_TICKER, "b": "0"}, INGEST_TIME)

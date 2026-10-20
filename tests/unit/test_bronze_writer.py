@@ -16,12 +16,15 @@ from pipeline.common.config import Settings
 from pipeline.common.iceberg import (
     BRONZE_ARROW_SCHEMA,
     BRONZE_TABLE,
+    TICKER_ARROW_SCHEMA,
+    TICKER_TABLE,
     ensure_bronze_table,
     events_to_arrow,
     load_lake_catalog,
+    tickers_to_arrow,
 )
-from pipeline.common.models import TradeEvent
-from pipeline.consumer.bronze_writer import BronzeWriter
+from pipeline.common.models import TickerEvent, TradeEvent
+from pipeline.consumer.bronze_writer import BronzeWriter, TickerWriter
 
 NAMESPACE = "testdb"
 
@@ -118,3 +121,35 @@ def test_cross_replica_replay_does_not_duplicate_rows(tmp_path: Path) -> None:
     table = catalog.load_table(f"{NAMESPACE}.{BRONZE_TABLE}")
     assert table.scan().to_arrow().num_rows == 5
 
+
+
+def _ticker(event_time: datetime) -> TickerEvent:
+    return TickerEvent(
+        symbol="XRPUSDT",
+        event_time=event_time,
+        ingest_time=event_time,
+        last_price=Decimal("0.5230"),
+        last_quantity=Decimal("10.5"),
+        bid_price=Decimal("0.5229"),
+        bid_quantity=Decimal("1200"),
+        ask_price=Decimal("0.5231"),
+        ask_quantity=Decimal("900"),
+        open_24h=Decimal("0.5218"),
+        high_24h=Decimal("0.5300"),
+        low_24h=Decimal("0.5150"),
+        volume_24h=Decimal("125000.5"),
+        quote_volume_24h=Decimal("65123.4"),
+        trade_count_24h=4321,
+    )
+
+
+def test_ticker_replay_does_not_duplicate_snapshots(tmp_path: Path) -> None:
+    catalog, settings = _catalog(tmp_path)
+    writer = TickerWriter(settings, tmp_path)
+    base = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+    events = [_ticker(base.replace(second=second)) for second in range(3)]
+    assert writer.write(events) == 3
+    assert writer.write(events) == 0
+    rows = catalog.load_table(f"{NAMESPACE}.{TICKER_TABLE}").scan().to_arrow()
+    assert rows.num_rows == 3
+    assert tickers_to_arrow(events).schema == TICKER_ARROW_SCHEMA

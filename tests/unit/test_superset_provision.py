@@ -58,7 +58,7 @@ def test_adhoc_builders_shape() -> None:
 
 def test_chart_specs_cover_both_tabs() -> None:
     specs = chart_specs(["XRPUSDT"])
-    assert len(specs) == 18
+    assert len(specs) == 20
     assert {spec.tab for spec in specs} == {provision.TAB_MARKET, provision.TAB_HEALTH}
     assert {spec.dataset for spec in specs} == {
         provision.GOLD_TABLE,
@@ -70,11 +70,12 @@ def test_chart_specs_cover_both_tabs() -> None:
         provision.INTEGRITY_TABLE,
         provision.FRESHNESS_TABLE,
         provision.LAYER_COUNTS_TABLE,
+        provision.MICRO_TABLE,
     }
     # Market tab is business-facing; pipeline health tab is the ops view.
     market = [spec for spec in specs if spec.tab == provision.TAB_MARKET]
     health = [spec for spec in specs if spec.tab == provision.TAB_HEALTH]
-    assert len(market) == 12 and len(health) == 6
+    assert len(market) == 14 and len(health) == 6
     # The candlestick and the two summary tables span a full row.
     wide = [spec.name for spec in market if spec.wide]
     assert wide == [
@@ -108,7 +109,7 @@ def test_chart_specs_single_symbol_filters() -> None:
 
 def test_chart_specs_multi_symbol_groups_by_symbol() -> None:
     specs = chart_specs(["BTCUSDT", "ETHUSDT"])
-    assert len(specs) == 18
+    assert len(specs) == 20
     coin_specs = [
         spec for spec in specs if spec.dataset in (provision.GOLD_TABLE, provision.UNIFIED_TABLE)
     ]
@@ -120,6 +121,12 @@ def test_chart_specs_multi_symbol_groups_by_symbol() -> None:
             continue
         assert params["groupby"] == ["symbol"]
         assert "adhoc_filters" not in params
+    micro_specs = [spec for spec in specs if spec.dataset == provision.MICRO_TABLE]
+    assert len(micro_specs) == 2
+    for spec in micro_specs:
+        params = chart_params(spec, 10)
+        assert params["groupby"] == ["symbol"]
+
     metrics_specs = [spec for spec in specs if spec.dataset == provision.METRICS_TABLE]
     assert len(metrics_specs) == 2  # lag and batch rows are separate charts
     for spec in metrics_specs:

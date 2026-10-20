@@ -22,6 +22,8 @@ class Settings(BaseSettings):
     kafka_bootstrap: str = "localhost:9092"
     topic: str = "trades.raw"
     consumer_group: str = "bronze-writer"
+    ticker_topic: str = "ticker.raw"
+    ticker_consumer_group: str = "ticker-writer"
 
     # Source
     symbols: list[str] = ["XRPUSDT"]

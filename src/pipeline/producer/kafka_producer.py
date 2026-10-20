@@ -5,20 +5,26 @@ from confluent_kafka.admin import AdminClient, NewTopic
 
 from pipeline.common.config import Settings
 from pipeline.common.logging import get_logger
-from pipeline.common.models import TradeEvent
+from pipeline.common.models import TickerEvent, TradeEvent
 
 logger = get_logger("producer.kafka")
 
 TRADE_PARTITIONS = 3
 
 
-class TradeProducer:
-    """Produces validated trade events, keyed by symbol."""
+class EventProducer:
+    """Produces validated events, keyed by symbol, into one topic."""
 
-    def __init__(self, settings: Settings) -> None:
-        self._topic = settings.topic
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        topic: str,
+        partition_map: dict[str, int] | None = None,
+    ) -> None:
+        self._topic = topic
         self._bootstrap = settings.kafka_bootstrap
-        self._partition_map = dict(settings.symbol_partitions)
+        self._partition_map = dict(partition_map or {})
         for symbol, partition in self._partition_map.items():
             if not 0 <= partition < TRADE_PARTITIONS:
                 raise ValueError(
@@ -59,7 +65,7 @@ class TradeProducer:
                 else:
                     raise
 
-    def produce(self, event: TradeEvent) -> None:
+    def produce(self, event: TradeEvent | TickerEvent) -> None:
         """Queue one event. Call `poll`/`flush` to drive delivery callbacks."""
         self._producer.produce(
             self._topic,
@@ -81,6 +87,24 @@ class TradeProducer:
     def queued(self) -> int:
         """Messages currently buffered client-side."""
         return len(self._producer)
+
+
+class TradeProducer(EventProducer):
+    """Trade producer: topic + optional per-symbol partition pinning (ADR-028)."""
+
+    def __init__(self, settings: Settings) -> None:
+        super().__init__(
+            settings,
+            topic=settings.topic,
+            partition_map=settings.symbol_partitions,
+        )
+
+
+class TickerProducer(EventProducer):
+    """Ticker producer: hash partitioning (1 Hz per symbol, no skew risk)."""
+
+    def __init__(self, settings: Settings) -> None:
+        super().__init__(settings, topic=settings.ticker_topic)
 
 
 def _on_delivery(error: KafkaError | None, message: Message) -> None:

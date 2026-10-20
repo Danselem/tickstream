@@ -5,7 +5,7 @@ import time
 from pipeline.common.models import TradeEvent
 
 
-class TradeBatcher:
+class Batcher[E]:
     """Collect events until `max_rows` or `interval_s` elapse. Caller passes `now` (testable)."""
 
     def __init__(self, max_rows: int, interval_s: float) -> None:
@@ -15,10 +15,10 @@ class TradeBatcher:
             raise ValueError("interval_s must be > 0")
         self._max_rows = max_rows
         self._interval_s = interval_s
-        self._events: list[TradeEvent] = []
+        self._events: list[E] = []
         self._window_start = time.monotonic()
 
-    def add(self, event: TradeEvent) -> None:
+    def add(self, event: E) -> None:
         """Append one event to the current window."""
         self._events.append(event)
 
@@ -28,7 +28,7 @@ class TradeBatcher:
             return True
         return bool(self._events) and now - self._window_start >= self._interval_s
 
-    def drain(self) -> list[TradeEvent]:
+    def drain(self) -> list[E]:
         """Take the current window. Does NOT restart the timer — the caller calls
         `start_window` *after* the write/commit so a slow flush cannot leave the
         next window already expired (that caused 1-row batches; Oct 2026)."""
@@ -42,3 +42,7 @@ class TradeBatcher:
 
     def __len__(self) -> int:
         return len(self._events)
+
+
+class TradeBatcher(Batcher[TradeEvent]):
+    """Backwards-compatible trade batcher (kept for the existing trade consumer/tests)."""

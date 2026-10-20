@@ -56,3 +56,40 @@ sources:
             description: "Backfill write time, UTC."
           - name: source
             description: "Archive source label (archive)."
+      - name: bronze_tickers
+        description: "Raw 1 Hz top-of-book snapshots, upserted on (symbol, event_time). Never modified."
+        loaded_at_field: ingest_time
+        freshness:
+          warn_after: { count: 5, period: minute }
+          error_after: { count: 30, period: minute }
+        columns:
+          - name: symbol
+            description: "Trading pair."
+          - name: event_time
+            description: "Exchange event time, UTC (Binance `E`)."
+          - name: ingest_time
+            description: "Producer arrival time, UTC."
+          - name: last_price
+            description: "Last trade price (Binance `c`)."
+          - name: last_quantity
+            description: "Last trade quantity (Binance `Q`)."
+          - name: bid_price
+            description: "Best bid price (Binance `b`)."
+          - name: bid_quantity
+            description: "Best bid quantity (Binance `B`)."
+          - name: ask_price
+            description: "Best ask price (Binance `a`)."
+          - name: ask_quantity
+            description: "Best ask quantity (Binance `A`)."
+          - name: open_24h
+            description: "Rolling 24 h open (Binance `o`)."
+          - name: high_24h
+            description: "Rolling 24 h high (Binance `h`)."
+          - name: low_24h
+            description: "Rolling 24 h low (Binance `l`)."
+          - name: volume_24h
+            description: "Rolling 24 h base volume (Binance `v`)."
+          - name: quote_volume_24h
+            description: "Rolling 24 h quote volume (Binance `q`)."
+          - name: trade_count_24h
+            description: "Rolling 24 h trade count (Binance `n`)."

@@ -128,3 +128,14 @@ the lake bucket first (`force_destroy = false` blocks destroying a non-empty buc
    `SELECT source, count(*) FROM gold_candles_1m_unified WHERE symbol='BTCUSDT' GROUP BY 1`.
 4. Failures are usually a missing daily file (T+1) or a checksum mismatch; the
    log names the URL. Today's UTC day is live-only until tomorrow's archive.
+
+## Ticker stream (`@ticker`, ADR-029)
+
+- Services: `ticker-producer` → `ticker.raw` → `ticker-consumer` →
+  `bronze_tickers`. Check `docker logs tickstream-ticker-producer` for
+  `ws_connected`/`ws_throughput` (expect ~7 msg/s) and
+  `docker logs tickstream-ticker-consumer` for `batch_committed`.
+- Verify: `SELECT max(event_time) FROM tickstream.bronze_tickers` should be
+  within a minute; `make dbt-build` creates `silver_tickers` and
+  `gold_market_microstructure_1m`. The GX gate skips the ticker suite only if
+  `bronze_tickers` does not exist yet.

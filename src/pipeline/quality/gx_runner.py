@@ -20,6 +20,7 @@ from pyiceberg.table import Table
 
 from pipeline.common.config import Settings
 from pipeline.common.iceberg import (
+    TICKER_TABLE,
     append_arrow,
     bronze_location,
     ensure_bronze_table,
@@ -41,6 +42,7 @@ FIRST_RUN_LOOKBACK = timedelta(days=1)
 CLOCK_SKEW_ALLOWANCE = timedelta(seconds=60)
 
 SUITE_NAME = "bronze_trades"
+TICKER_SUITE_NAME = "bronze_tickers"
 
 BRONZE_COLUMNS = [
     "symbol",
@@ -50,6 +52,24 @@ BRONZE_COLUMNS = [
     "event_time",
     "ingest_time",
     "is_buyer_maker",
+]
+
+TICKER_COLUMNS = [
+    "symbol",
+    "event_time",
+    "ingest_time",
+    "last_price",
+    "last_quantity",
+    "bid_price",
+    "bid_quantity",
+    "ask_price",
+    "ask_quantity",
+    "open_24h",
+    "high_24h",
+    "low_24h",
+    "volume_24h",
+    "quote_volume_24h",
+    "trade_count_24h",
 ]
 
 
@@ -90,6 +110,51 @@ def load_window(bronze: Table, start: datetime, end: datetime) -> pd.DataFrame:
     if not df.empty:
         df["unique_key"] = df["symbol"].astype(str) + ":" + df["trade_id"].astype(str)
     return df
+
+
+def load_ticker_window(bronze: Table, start: datetime, end: datetime) -> pd.DataFrame:
+    """Load the ticker window, adding `unique_key` = (symbol, event_time)."""
+    predicate = And(
+        GreaterThanOrEqual(term=Reference("event_time"), value=literal(_naive(start))),
+        LessThanOrEqual(term=Reference("event_time"), value=literal(_naive(end))),
+    )
+    df: pd.DataFrame = bronze.scan(row_filter=predicate).to_arrow().to_pandas()
+    if not df.empty:
+        df["unique_key"] = df["symbol"].astype(str) + ":" + df["event_time"].astype(str)
+    return df
+
+
+def build_ticker_suite(freshness_cutoff: datetime, now: datetime) -> gx.ExpectationSuite:
+    """Ticker gate: keys, positive quote prices, freshness (window stamped per run)."""
+    return gx.ExpectationSuite(
+        name=TICKER_SUITE_NAME,
+        expectations=[
+            gxe.ExpectTableColumnsToMatchSet(column_set=TICKER_COLUMNS, exact_match=False),
+            *(
+                gxe.ExpectColumnValuesToNotBeNull(column=column)
+                for column in TICKER_COLUMNS
+            ),
+            gxe.ExpectColumnValuesToBeUnique(column="unique_key"),
+            *(
+                gxe.ExpectColumnValuesToBeBetween(
+                    column=column, min_value=0, strict_min=True
+                )
+                for column in (
+                    "last_price",
+                    "bid_price",
+                    "ask_price",
+                    "open_24h",
+                    "high_24h",
+                    "low_24h",
+                )
+            ),
+            gxe.ExpectColumnMaxToBeBetween(
+                column="event_time",
+                min_value=_naive(freshness_cutoff),
+                max_value=_naive(now + CLOCK_SKEW_ALLOWANCE),
+            ),
+        ],
+    )
 
 
 def build_bronze_suite(
@@ -194,6 +259,39 @@ def run_quality(
     df = load_window(bronze, window_start, window_end)
 
     failed: list[str]
+    ticker_failed: list[str] = []
+    ticker_table = (
+        catalog.load_table(f"{settings.glue_database}.{TICKER_TABLE}")
+        if catalog.table_exists(f"{settings.glue_database}.{TICKER_TABLE}")
+        else None
+    )
+    ticker_rows = 0
+    if ticker_table is None:
+        logger.info("ticker_table_missing_skipped")
+    else:
+        ticker_df = load_ticker_window(ticker_table, window_start, window_end)
+        ticker_rows = int(len(ticker_df))
+        if ticker_df.empty:
+            ticker_failed = ["ticker:empty_window"]
+        else:
+            try:
+                _, ticker_checks = _run_checkpoint(
+                    ticker_df,
+                    build_ticker_suite(
+                        freshness_cutoff=check_at
+                        - timedelta(seconds=settings.freshness_max_lag_s),
+                        now=check_at,
+                    ),
+                )
+                ticker_failed = [f"ticker:{name}" for name in ticker_checks]
+            except Exception as exc:  # noqa: BLE001 — a GX crash is a failed check
+                logger.error(
+                    "gx_ticker_runner_error",
+                    error=str(exc),
+                    traceback=traceback.format_exc(limit=5),
+                )
+                ticker_failed = [f"ticker:runner_error:{type(exc).__name__}"]
+
     suite = build_bronze_suite(
         freshness_cutoff=check_at - timedelta(seconds=settings.freshness_max_lag_s),
         now=check_at,
@@ -207,12 +305,13 @@ def run_quality(
             logger.error("gx_runner_error", error=str(exc), traceback=traceback.format_exc(limit=5))
             failed = [f"runner_error:{type(exc).__name__}"]
 
+    failed.extend(ticker_failed)
     result = QualityResult(
         check_at=check_at,
         success=not failed,
         window_start=window_start,
         window_end=window_end,
-        rows_scanned=int(len(df)),
+        rows_scanned=int(len(df)) + ticker_rows,
         failed_expectations=tuple(failed),
         run_ms=(time.monotonic() - started) * 1000,
     )

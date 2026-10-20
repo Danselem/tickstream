@@ -22,6 +22,7 @@ from typing import Any
 DATABASE_NAME = "tickstream_athena"
 GOLD_TABLE = "gold_candles_1m"
 UNIFIED_TABLE = "gold_candles_1m_unified"
+MICRO_TABLE = "gold_market_microstructure_1m"
 DAILY_SUMMARY_TABLE = "gold_market_summary_daily"
 HOURLY_SUMMARY_TABLE = "gold_market_summary_hourly"
 QUALITY_TABLE = "quality_results"
@@ -48,6 +49,7 @@ DATASET_TABLES = (
     FRESHNESS_TABLE,
     LAYER_COUNTS_TABLE,
     UNIFIED_TABLE,
+    MICRO_TABLE,
 )
 
 # Trailing windows relative to "now". Superset's named presets ("Last day",
@@ -466,6 +468,38 @@ def chart_specs(symbols: list[str]) -> list[ChartSpec]:
                 "metrics": [adhoc_metric("close", "AVG")],
                 "y_axis_format": ",.2f",
                 "row_limit": 20000,
+                **view,
+            },
+        ),
+        ChartSpec(
+            name=f"{prefix}quoted spread (bps, 1m)",
+            tab=TAB_MARKET,
+            viz_type="echarts_timeseries_line",
+            dataset=MICRO_TABLE,
+            x_axis_title="Time (UTC)",
+            y_axis_title="Quoted spread (bps)",
+            time_range=DETAIL_TIME_RANGE,
+            params={
+                "x_axis": "window_start",
+                "time_grain_sqla": "PT1M",
+                "metrics": [adhoc_metric("avg_spread_bps", "AVG")],
+                "y_axis_format": ".2f",
+                **view,
+            },
+        ),
+        ChartSpec(
+            name=f"{prefix}book imbalance (1m)",
+            tab=TAB_MARKET,
+            viz_type="echarts_timeseries_line",
+            dataset=MICRO_TABLE,
+            x_axis_title="Time (UTC)",
+            y_axis_title="(bid qty − ask qty) / total",
+            time_range=DETAIL_TIME_RANGE,
+            params={
+                "x_axis": "window_start",
+                "time_grain_sqla": "PT1M",
+                "metrics": [adhoc_metric("avg_imbalance", "AVG")],
+                "y_axis_format": ".2f",
                 **view,
             },
         ),
@@ -1107,7 +1141,7 @@ def main() -> None:
         chart_id = api.ensure_chart(spec.name, spec.viz_type, dataset_id, params)
         placed[spec.tab].append((chart_id, spec.name, spec.wide))
         all_chart_ids.append(chart_id)
-        if spec.dataset in (GOLD_TABLE, UNIFIED_TABLE):
+        if spec.dataset in (GOLD_TABLE, UNIFIED_TABLE, MICRO_TABLE):
             gold_chart_ids.append(chart_id)
         print(f"chart ready: {spec.name} (id={chart_id})", flush=True)
 

@@ -51,6 +51,77 @@ class TradeEvent(BaseModel):
         )
 
 
+class TickerEvent(BaseModel):
+    """One `@ticker` snapshot (1 Hz). Dedup key is (symbol, event_time)."""
+
+    model_config = ConfigDict(frozen=True, strict=False)
+
+    symbol: str = Field(min_length=1)
+    event_time: datetime  # exchange event time (Binance `E`)
+    ingest_time: datetime  # arrival time at the producer (UTC)
+    last_price: Decimal = Field(gt=0)
+    last_quantity: Decimal = Field(ge=0)
+    bid_price: Decimal = Field(gt=0)
+    bid_quantity: Decimal = Field(ge=0)
+    ask_price: Decimal = Field(gt=0)
+    ask_quantity: Decimal = Field(ge=0)
+    open_24h: Decimal = Field(gt=0)
+    high_24h: Decimal = Field(gt=0)
+    low_24h: Decimal = Field(gt=0)
+    volume_24h: Decimal = Field(ge=0)
+    quote_volume_24h: Decimal = Field(ge=0)
+    trade_count_24h: int = Field(ge=0)
+
+    @field_validator("event_time", "ingest_time")
+    @classmethod
+    def _must_be_utc(cls, value: datetime) -> datetime:
+        if value.tzinfo is None:
+            return value.replace(tzinfo=UTC)
+        return value.astimezone(UTC)
+
+    @classmethod
+    def from_binance_payload(cls, payload: dict[str, Any], ingest_time: datetime) -> "TickerEvent":
+        """Parse a raw or combined `@ticker` message. Combined streams wrap the
+        fields in `data`; the values are strings (keep decimals exact)."""
+        data = payload.get("data", payload)
+        try:
+            event_time = _ms_to_utc(int(data["E"]))
+            symbol = str(data["s"]).upper()
+            values = (
+                Decimal(str(data["c"])),
+                Decimal(str(data["Q"])),
+                Decimal(str(data["b"])),
+                Decimal(str(data["B"])),
+                Decimal(str(data["a"])),
+                Decimal(str(data["A"])),
+                Decimal(str(data["o"])),
+                Decimal(str(data["h"])),
+                Decimal(str(data["l"])),
+                Decimal(str(data["v"])),
+                Decimal(str(data["q"])),
+                int(data["n"]),
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(f"bad ticker payload: {payload!r}") from exc
+        return cls(
+            symbol=symbol,
+            event_time=event_time,
+            ingest_time=ingest_time,
+            last_price=values[0],
+            last_quantity=values[1],
+            bid_price=values[2],
+            bid_quantity=values[3],
+            ask_price=values[4],
+            ask_quantity=values[5],
+            open_24h=values[6],
+            high_24h=values[7],
+            low_24h=values[8],
+            volume_24h=values[9],
+            quote_volume_24h=values[10],
+            trade_count_24h=values[11],
+        )
+
+
 class BatchReport(BaseModel):
     """Summary of one consumer micro-batch, for logs and the ops metrics table."""
 
@@ -120,4 +191,3 @@ class SymbolFreshness(BaseModel):
     symbol: str = Field(min_length=1)
     max_event_time: datetime | None = None
     freshness_seconds: float | None = Field(default=None, ge=0)
-

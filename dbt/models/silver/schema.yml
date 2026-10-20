@@ -82,3 +82,44 @@ models:
         description: "Trades in the minute."
         tests:
           - not_null
+
+  - name: silver_tickers
+    description: "Deduped ticker snapshots (one row per symbol + event_time). Incremental MERGE with a 2-hour lookback."
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns:
+            - symbol
+            - event_time
+    columns:
+      - name: symbol
+        description: "Trading pair (USDT-quoted)."
+        tests:
+          - not_null
+      - name: event_time
+        description: "Exchange event time, UTC."
+        tests:
+          - not_null
+      - name: bid_price
+        description: "Best bid price, must be positive."
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: "> 0"
+      - name: ask_price
+        description: "Best ask price, must be positive."
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: "> 0"
+      - name: last_price
+        description: "Last trade price."
+        tests:
+          - not_null
+      - name: trade_count_24h
+        description: "Rolling 24 h trade count."
+        tests:
+          - not_null
+      - name: ingest_time
+        description: "Producer arrival time, UTC."
+        tests:
+          - not_null

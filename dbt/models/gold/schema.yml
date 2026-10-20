@@ -246,3 +246,62 @@ models:
           - not_null
           - accepted_values:
               values: ["live", "kline"]
+
+  - name: gold_market_microstructure_1m
+    description: "Per-minute top-of-book: quoted spread (bps), mid, displayed depth, imbalance, last price. Incremental MERGE."
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns:
+            - symbol
+            - window_start
+    columns:
+      - name: symbol
+        description: "Trading pair."
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: "LIKE '%USDT'"
+      - name: window_start
+        description: "Minute bucket, UTC."
+        tests:
+          - not_null
+      - name: avg_spread_bps
+        description: "Average quoted spread in basis points."
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: ">= 0"
+      - name: avg_mid
+        description: "Average mid price."
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: "> 0"
+      - name: avg_bid_qty
+        description: "Average displayed best-bid quantity."
+        tests:
+          - not_null
+      - name: avg_ask_qty
+        description: "Average displayed best-ask quantity."
+        tests:
+          - not_null
+      - name: avg_imbalance
+        description: "Average (bid_qty - ask_qty) / (bid_qty + ask_qty), in [-1, 1]."
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: "between -1 and 1"
+      - name: last_price
+        description: "Last trade price in the minute."
+        tests:
+          - not_null
+      - name: tick_count
+        description: "Snapshots aggregated in the minute."
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: "> 0"
+      - name: last_ingest_time
+        description: "Latest snapshot ingest time, UTC."
+        tests:
+          - not_null

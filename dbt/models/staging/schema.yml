@@ -40,3 +40,27 @@ models:
         description: "Close price."
         tests:
           - not_null
+
+  - name: stg_tickers
+    description: "Typed view over bronze_tickers (1 Hz top-of-book snapshots). No dedup."
+    columns:
+      - name: symbol
+        description: "Trading pair."
+        tests:
+          - not_null
+      - name: event_time
+        description: "Exchange event time, UTC."
+        tests:
+          - not_null
+      - name: bid_price
+        description: "Best bid price."
+        tests:
+          - not_null
+      - name: ask_price
+        description: "Best ask price."
+        tests:
+          - not_null
+      - name: ingest_time
+        description: "Producer arrival time, UTC."
+        tests:
+          - not_null

@@ -5,7 +5,9 @@ from confluent_kafka import Consumer
 from pipeline.common.config import Settings
 
 
-def build_consumer(settings: Settings) -> Consumer:
+def build_consumer(
+    settings: Settings, *, topic: str | None = None, group: str | None = None
+) -> Consumer:
     """At-least-once consumer: no auto-commit, earliest on first start.
 
     max.poll.interval.ms is 10 min (not the 5 min default): big backlog batches +
@@ -20,11 +22,11 @@ def build_consumer(settings: Settings) -> Consumer:
     return Consumer(
         {
             "bootstrap.servers": settings.kafka_bootstrap,
-            "group.id": settings.consumer_group,
+            "group.id": group or settings.consumer_group,
             "enable.auto.commit": False,
             "auto.offset.reset": "earliest",
             "max.poll.interval.ms": 600_000,
             "partition.assignment.strategy": "cooperative-sticky",
-            "client.id": "tickstream-consumer",
+            "client.id": f"tickstream-{(group or settings.consumer_group)}",
         }
     )

@@ -43,12 +43,16 @@ from pipeline.common.models import (
     LayerCount,
     QualityResult,
     SymbolFreshness,
+    TickerEvent,
     TradeEvent,
 )
 
 BRONZE_TABLE = "bronze_trades"
 # Bronze identity: every layer (merge here, silver dedup, GX uniqueness) keys on these.
 BRONZE_KEYS = ["symbol", "trade_id"]
+
+TICKER_TABLE = "bronze_tickers"
+TICKER_KEYS = ["symbol", "event_time"]
 
 # Ops tables live in the same Glue database (ADR-008): unpartitioned append
 # tables. Tiny by design (one row per batch / per quality run); Superset reads
@@ -70,6 +74,7 @@ class OpsTables:
     layer_counts: Table
     freshness: Table
 
+
 BRONZE_ARROW_SCHEMA = pa.schema(
     [
         pa.field("symbol", pa.string(), nullable=False),
@@ -81,6 +86,74 @@ BRONZE_ARROW_SCHEMA = pa.schema(
         pa.field("is_buyer_maker", pa.bool_(), nullable=False),
     ]
 )
+
+
+TICKER_ARROW_SCHEMA = pa.schema(
+    [
+        pa.field("symbol", pa.string(), nullable=False),
+        pa.field("event_time", pa.timestamp("us"), nullable=False),
+        pa.field("ingest_time", pa.timestamp("us"), nullable=False),
+        pa.field("last_price", pa.decimal128(20, 8), nullable=False),
+        pa.field("last_quantity", pa.decimal128(20, 8), nullable=False),
+        pa.field("bid_price", pa.decimal128(20, 8), nullable=False),
+        pa.field("bid_quantity", pa.decimal128(20, 8), nullable=False),
+        pa.field("ask_price", pa.decimal128(20, 8), nullable=False),
+        pa.field("ask_quantity", pa.decimal128(20, 8), nullable=False),
+        pa.field("open_24h", pa.decimal128(20, 8), nullable=False),
+        pa.field("high_24h", pa.decimal128(20, 8), nullable=False),
+        pa.field("low_24h", pa.decimal128(20, 8), nullable=False),
+        pa.field("volume_24h", pa.decimal128(38, 8), nullable=False),
+        pa.field("quote_volume_24h", pa.decimal128(38, 8), nullable=False),
+        pa.field("trade_count_24h", pa.int64(), nullable=False),
+    ]
+)
+
+
+def ticker_schema() -> Schema:
+    """Bronze ticker snapshots: raw top-of-book + rolling 24 h stats."""
+    return Schema(
+        NestedField(1, "symbol", StringType(), required=True),
+        NestedField(2, "event_time", TimestampType(), required=True),
+        NestedField(3, "ingest_time", TimestampType(), required=True),
+        NestedField(4, "last_price", DecimalType(20, 8), required=True),
+        NestedField(5, "last_quantity", DecimalType(20, 8), required=True),
+        NestedField(6, "bid_price", DecimalType(20, 8), required=True),
+        NestedField(7, "bid_quantity", DecimalType(20, 8), required=True),
+        NestedField(8, "ask_price", DecimalType(20, 8), required=True),
+        NestedField(9, "ask_quantity", DecimalType(20, 8), required=True),
+        NestedField(10, "open_24h", DecimalType(20, 8), required=True),
+        NestedField(11, "high_24h", DecimalType(20, 8), required=True),
+        NestedField(12, "low_24h", DecimalType(20, 8), required=True),
+        NestedField(13, "volume_24h", DecimalType(38, 8), required=True),
+        NestedField(14, "quote_volume_24h", DecimalType(38, 8), required=True),
+        NestedField(15, "trade_count_24h", LongType(), required=True),
+    )
+
+
+def ticker_partition_spec() -> PartitionSpec:
+    """Partition ticker snapshots by event day + symbol (same shape as trades)."""
+    return PartitionSpec(
+        PartitionField(source_id=2, field_id=2000, transform=DayTransform(), name="event_date"),
+        PartitionField(source_id=1, field_id=2001, transform=IdentityTransform(), name="symbol"),
+    )
+
+
+def ticker_location(settings: Settings) -> str | None:
+    """Explicit S3 prefix for bronze tickers; None for the offline SQL catalog."""
+    if settings.catalog_type == "sql":
+        return None
+    return f"s3://{settings.s3_bucket}/bronze/{TICKER_TABLE}"
+
+
+def ensure_ticker_table(catalog: Catalog, database: str, location: str | None = None) -> Table:
+    """Create the bronze ticker table if absent (idempotent)."""
+    return catalog.create_table_if_not_exists(
+        f"{database}.{TICKER_TABLE}",
+        schema=ticker_schema(),
+        partition_spec=ticker_partition_spec(),
+        location=location,
+        properties={"format-version": "2", "write.format.default": "parquet"},
+    )
 
 
 def load_lake_catalog(settings: Settings, warehouse_dir: Path | None = None) -> Catalog:
@@ -137,9 +210,7 @@ def bronze_location(settings: Settings) -> str | None:
     return f"s3://{settings.s3_bucket}/bronze/{BRONZE_TABLE}"
 
 
-def ensure_bronze_table(
-    catalog: Catalog, database: str, location: str | None = None
-) -> Table:
+def ensure_bronze_table(catalog: Catalog, database: str, location: str | None = None) -> Table:
     """Create the bronze table if absent (idempotent). Returns the loaded table."""
     return catalog.create_table_if_not_exists(
         f"{database}.{BRONZE_TABLE}",
@@ -167,22 +238,17 @@ def events_to_arrow(events: list[TradeEvent]) -> pa.Table:
     return pa.Table.from_pylist(rows, schema=BRONZE_ARROW_SCHEMA)
 
 
-def upsert_events(table: Table, events: list[TradeEvent]) -> int:
-    """Idempotent micro-batch write, returning rows appended. Replays are safe.
+def _upsert_rows(table: Table, batch: pa.Table, key_columns: list[str]) -> int:
+    """Append only rows whose key tuple is absent from the batch's partition scope.
 
-    Mechanism (Oct 2026, ADR-013): ``table.upsert`` does a Python-side
-    full-table merge — O(table) per batch, 20+ min at 300k rows. Instead, scan
-    only the batch's partition scope (day range × symbols; manifest pruning
-    does the work), anti-join keys in Arrow/Python (batch-sized), and append
-    only genuinely new rows. A full replay appends nothing (no empty commit).
-    Same guarantee as before: bronze holds no duplicate (symbol, trade_id).
+    Shared by trades `(symbol, trade_id)` and tickers `(symbol, event_time)`.
+    Replays append nothing; no empty commit is made.
     """
-    batch = events_to_arrow(events)
     # Each consumer replica caches its own Table handle and only sees its OWN
     # appends in place. Refresh first so this writer also sees rows committed by
     # the other replicas: on a rebalance the new partition owner replays a batch
     # the old owner already wrote, and without this refresh the anti-join misses
-    # those rows and appends duplicate (symbol, trade_id) (ADR-015).
+    # those rows and appends duplicate keys (ADR-015).
     table = table.refresh()
     symbols = pc.unique(batch.column("symbol")).to_pylist()
     lo = pc.min(batch.column("event_time")).as_py()
@@ -193,27 +259,17 @@ def upsert_events(table: Table, events: list[TradeEvent]) -> int:
         left=GreaterThanOrEqual(term=Reference("event_time"), value=literal(day_lo)),
         right=LessThan(term=Reference("event_time"), value=literal(day_hi)),
     )
-    equalities = [
-        EqualTo(term=Reference("symbol"), value=literal(symbol)) for symbol in symbols
-    ]
+    equalities = [EqualTo(term=Reference("symbol"), value=literal(symbol)) for symbol in symbols]
     symbol_match: BooleanExpression = equalities[0]
     for extra in equalities[1:]:
         symbol_match = Or(left=symbol_match, right=extra)
     scope = And(left=time_window, right=symbol_match)
-    existing = table.scan(
-        row_filter=scope, selected_fields=("symbol", "trade_id")
-    ).to_arrow()
-    have = set(
-        zip(
-            existing.column("symbol").to_pylist(),
-            existing.column("trade_id").to_pylist(),
-            strict=True,
-        )
-    )
-    seen: set[tuple[str, int]] = set()
+    existing = table.scan(row_filter=scope, selected_fields=tuple(key_columns)).to_arrow()
+    have = set(zip(*(existing.column(column).to_pylist() for column in key_columns), strict=True))
+    seen: set[tuple[object, ...]] = set()
     keep: list[int] = []
-    for i, event in enumerate(events):
-        key = (event.symbol, event.trade_id)
+    for i, row in enumerate(batch.to_pylist()):
+        key = tuple(row[column] for column in key_columns)
         if key not in have and key not in seen:
             seen.add(key)
             keep.append(i)
@@ -221,6 +277,52 @@ def upsert_events(table: Table, events: list[TradeEvent]) -> int:
         return 0
     table.append(batch.take(keep))
     return len(keep)
+
+
+def upsert_events(table: Table, events: list[TradeEvent]) -> int:
+    """Idempotent trade micro-batch write, returning rows appended. Replays are safe.
+
+    Mechanism (Oct 2026, ADR-013): ``table.upsert`` does a Python-side
+    full-table merge — O(table) per batch, 20+ min at 300k rows. Instead, scan
+    only the batch's partition scope (day range × symbols; manifest pruning
+    does the work), anti-join keys in Arrow/Python (batch-sized), and append
+    only genuinely new rows. A full replay appends nothing (no empty commit).
+    """
+    if not events:
+        raise ValueError("refusing to write an empty batch")
+    return _upsert_rows(table, events_to_arrow(events), BRONZE_KEYS)
+
+
+def tickers_to_arrow(events: list[TickerEvent]) -> pa.Table:
+    """Convert validated ticker events to Arrow (naive UTC timestamps)."""
+    rows = [
+        {
+            "symbol": event.symbol,
+            "event_time": event.event_time.astimezone(UTC).replace(tzinfo=None),
+            "ingest_time": event.ingest_time.astimezone(UTC).replace(tzinfo=None),
+            "last_price": event.last_price,
+            "last_quantity": event.last_quantity,
+            "bid_price": event.bid_price,
+            "bid_quantity": event.bid_quantity,
+            "ask_price": event.ask_price,
+            "ask_quantity": event.ask_quantity,
+            "open_24h": event.open_24h,
+            "high_24h": event.high_24h,
+            "low_24h": event.low_24h,
+            "volume_24h": event.volume_24h,
+            "quote_volume_24h": event.quote_volume_24h,
+            "trade_count_24h": event.trade_count_24h,
+        }
+        for event in events
+    ]
+    return pa.Table.from_pylist(rows, schema=TICKER_ARROW_SCHEMA)
+
+
+def upsert_tickers(table: Table, events: list[TickerEvent]) -> int:
+    """Idempotent ticker micro-batch write on (symbol, event_time); replays are safe."""
+    if not events:
+        raise ValueError("refusing to write an empty batch")
+    return _upsert_rows(table, tickers_to_arrow(events), TICKER_KEYS)
 
 
 QUALITY_RESULTS_ARROW_SCHEMA = pa.schema(
@@ -354,9 +456,7 @@ def quality_result_to_arrow(result: QualityResult) -> pa.Table:
 
 def metrics_to_arrow(report: BatchReport, collected_at: datetime) -> pa.Table:
     """Convert a BatchReport to Arrow for the pipeline_metrics ops table."""
-    max_event_time = (
-        None if report.max_event_time is None else _naive_utc(report.max_event_time)
-    )
+    max_event_time = None if report.max_event_time is None else _naive_utc(report.max_event_time)
     return pa.Table.from_pylist(
         [
             {

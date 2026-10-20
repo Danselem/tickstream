@@ -5,16 +5,20 @@ flowchart LR
     BIN[Binance WS combined stream<br/>7 coins × @trade] --> PROD[producer<br/>websockets + pydantic<br/>acks=all, idempotent, zstd]
     PROD --> KAFKA[Kafka KRaft 1 broker<br/>trades.raw, 3 partitions<br/>key=symbol, 7-day retention]
     KAFKA --> CONS[consumer ×3, one per partition<br/>45 s / 20k-row micro-batches<br/>tenacity retry + best-effort metrics]
+    BIN --> TPROD[ticker-producer<br/>@ticker 1 Hz, own connection]
+    TPROD --> TKAFKA[ticker.raw, 3 partitions<br/>key=symbol]
+    TKAFKA --> TCONS[ticker-consumer ×1<br/>~460-row batches]
+    TCONS -->|merge on symbol,event_time| S3
     CONS -->|pruned-scan merge<br/>on symbol,trade_id<br/>offsets after write| S3[(S3 Iceberg bronze<br/>day+symbol partitions<br/>Glue catalog)]
     SCHED[scheduler loop<br/>every 10 min] --> GX[Great Expectations<br/>local PyIceberg scan<br/>schema/nulls/range/unique/fresh]
-    GX -->|pass| DBT[dbt on Athena<br/>stg view → silver merge<br/>→ gold 1m candles]
+    GX -->|pass| DBT[dbt on Athena<br/>stg views → silver merges<br/>→ gold candles + microstructure]
     GX -->|fail| BLOCK[block dbt<br/>report to quality_results]
     SCHED -.->|every N cycles| INT[whole-table integrity<br/>duplicate keys, local scan<br/>→ integrity_results]
     INT -->|duplicates>0| BLOCK
     SCHED -.->|every N cycles| HLTH[lake health<br/>rows per layer + per-symbol<br/>freshness → layer_counts,<br/>symbol_freshness]
     BIN -.->|archive 1m klines<br/>SHA256 + monthly/daily zips| BF[bronze_klines<br/>symbol partitions<br/>ADR-026]
     BF -.-> DBT
-    DBT --> SUP[Superset 6<br/>pyathena, REST-provisioned<br/>18 charts, published]
+    DBT --> SUP[Superset 6<br/>pyathena, REST-provisioned<br/>20 charts, published]
     S3 --> SUP
     DBT -.->|OPTIMIZE + VACUUM| S3
 ```
@@ -55,11 +59,13 @@ flowchart LR
      `dim_symbol`/`dim_time` views (ADR-019). Archive klines run in parallel:
      `stg_klines` → `silver_klines` → `gold_candles_1m_hist` (volatility NULL) and
      the `gold_candles_1m_unified` view (live candle wins per minute, ADR-026).
-     90+ tests, all columns documented.
+     The ticker chain runs alongside: `stg_tickers` → `silver_tickers` →
+     `gold_market_microstructure_1m` (spread/mid/depth/imbalance, ADR-029).
+     120+ tests, all columns documented.
  6. **Serve.** Superset 6 (derived image + `pyathena[pandas]`, SQLite metadata on
-      a volume) provisioned by a REST script: Athena database, 9 datasets
-      (gold, unified gold + 2 business summaries + 5 ops/health tables, never
-      bronze), 18 charts
+      a volume) provisioned by a REST script: Athena database, 10 datasets
+      (gold, unified gold, microstructure + 2 business summaries + 5 ops/health
+      tables, never bronze), 20 charts
       across two native tabs — **Market** (candlestick OHLC, price/VWAP, base
       volume, USD notional, trades/min, volatility, notional-share treemap, 2 KPI
       tiles, daily & hourly summary tables) and **Pipeline health** (lag, batch
@@ -67,12 +73,16 @@ flowchart LR
       Native **Symbol** (defaults to the first configured coin, BTC) and **Time
       range** filters (ADR-020/027); 24 h detail + 30 d trend windows (ADR-022/027);
       all charts/labels defined in code (ADR-018). One published dashboard.
- 7. **Backfill.** `make backfill` downloads Binance's monthly (complete months)
+ 7. **Tickers.** A dedicated producer polls `@ticker` for each symbol at 1 Hz
+    into `ticker.raw`; one consumer merges into `bronze_tickers` on
+    `(symbol, event_time)`, the GX gate validates it, and dbt builds the 1-minute
+    microstructure model (ADR-029).
+ 8. **Backfill.** `make backfill` downloads Binance's monthly (complete months)
     and daily (partial month) 1m kline zips, verifies each SHA256 sidecar,
     normalises microsecond timestamps to naive UTC, and replaces `bronze_klines`
     in one commit (ADR-026). It is offline, idempotent (`--force`) and gated by
     dbt tests (uniqueness, OHLC/volume bounds), not the live GX window.
- 8. **Maintain.** Every N scheduler cycles (and via `make maintenance`): Athena
+ 9. **Maintain.** Every N scheduler cycles (and via `make maintenance`): Athena
     `OPTIMIZE … REWRITE DATA USING BIN_PACK` + `VACUUM` on the Iceberg tables.
 
 ## Delivery semantics
