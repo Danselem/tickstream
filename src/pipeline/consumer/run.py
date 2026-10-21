@@ -29,13 +29,9 @@ def main(stream: str = "trades") -> None:
     # Table bootstrap does S3/Glue I/O: same transient handling as writes.
     writer: BronzeWriter | TickerWriter
     if ticker:
-        writer = with_transient_retry(
-            lambda: TickerWriter(settings), action="ticker_bronze_ensure"
-        )
+        writer = with_transient_retry(lambda: TickerWriter(settings), action="ticker_bronze_ensure")
     else:
-        writer = with_transient_retry(
-            lambda: BronzeWriter(settings), action="bronze_ensure"
-        )
+        writer = with_transient_retry(lambda: BronzeWriter(settings), action="bronze_ensure")
     ops = with_transient_retry(lambda: OpsWriter(settings), action="ops_ensure")
     consumer = build_consumer(settings, topic=topic, group=group)
     batcher: Batcher[TradeEvent] | Batcher[TickerEvent] = Batcher(
@@ -55,10 +51,6 @@ def main(stream: str = "trades") -> None:
         started = time.monotonic()
         writer.write(batch)  # type: ignore[arg-type]
         consumer.commit(asynchronous=False)
-        # Start the next window only AFTER the flush: if write+commit+metrics
-        # outruns batch_interval_s, the next batch must still get a full window
-        # (otherwise it flushes at one event — the Oct 2026 1-row stall).
-        batcher.start_window(time.monotonic())
         elapsed_ms = (time.monotonic() - started) * 1000
         max_event_time = max(event.event_time for event in batch)
         report = BatchReport(
@@ -75,6 +67,11 @@ def main(stream: str = "trades") -> None:
             ops.append_metrics(report)
         except Exception as exc:  # noqa: BLE001 — observability is best-effort
             logger.warning("metrics_append_failed", error=str(exc))
+        # Start the next window only AFTER every blocked step (Metrics appends
+        # can take tens of seconds under concurrent commits). Otherwise the new
+        # window is already expired when polling resumes and the first message
+        # flushes alone — the Oct 2026 1-row stall that grew lag without bound.
+        batcher.start_window(time.monotonic())
         logger.info("batch_committed", **report.model_dump(mode="json"))
 
     def _on_revoke(_consumer: Consumer, partitions: list[TopicPartition]) -> None:
