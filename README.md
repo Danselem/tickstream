@@ -38,7 +38,7 @@ make up                # all services; dashboard at http://localhost:8088
 flowchart LR
   B[Binance WS] -->|trades| P[producer] --> K[(trades.raw)] --> C[consumer ×3]
   C -->|merge on symbol, trade_id| BR[(bronze_trades)]
-  B -->|@ticker 1 Hz| TP[ticker-producer] --> TK[(ticker.raw)] --> TC[ticker-consumer]
+  B -->|"@ticker 1 Hz"| TP[ticker-producer] --> TK[(ticker.raw)] --> TC[ticker-consumer]
   TC -->|merge on symbol, event_time| BT[(bronze_tickers)]
   BR --> GX[GX gate<br/>local PyIceberg scan]
   BT --> GX

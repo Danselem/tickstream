@@ -2,10 +2,10 @@
 
 ```mermaid
 flowchart LR
-    BIN[Binance WS combined stream<br/>7 coins × @trade] --> PROD[producer<br/>websockets + pydantic<br/>acks=all, idempotent, zstd]
+    BIN["Binance WS combined stream<br/>7 coins × @trade"] --> PROD[producer<br/>websockets + pydantic<br/>acks=all, idempotent, zstd]
     PROD --> KAFKA[Kafka KRaft 1 broker<br/>trades.raw, 3 partitions<br/>key=symbol, 7-day retention]
     KAFKA --> CONS[consumer ×3, one per partition<br/>45 s / 20k-row micro-batches<br/>tenacity retry + best-effort metrics]
-    BIN --> TPROD[ticker-producer<br/>@ticker 1 Hz, own connection]
+    BIN --> TPROD["ticker-producer<br/>@ticker 1 Hz, own connection"]
     TPROD --> TKAFKA[ticker.raw, 3 partitions<br/>key=symbol]
     TKAFKA --> TCONS[ticker-consumer ×1<br/>~460-row batches]
     TCONS -->|merge on symbol,event_time| S3
