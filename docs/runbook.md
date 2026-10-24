@@ -139,3 +139,23 @@ the lake bucket first (`force_destroy = false` blocks destroying a non-empty buc
   within a minute; `make dbt-build` creates `silver_tickers` and
   `gold_market_microstructure_1m`. The GX gate skips the ticker suite only if
   `bronze_tickers` does not exist yet.
+
+## After a host stop or sleep (Docker daemon down)
+
+1. Start Docker Desktop and `make up`; the Kafka volume and consumer offsets
+   survive, producers reconnect automatically (check `ws_connected`).
+2. Stop the scheduler while repairing history:
+   `docker compose stop scheduler` → `make backfill FORCE=1` (defaults to the
+   first of the month 60 days ago through *yesterday*) → `make dbt-build` →
+   `docker compose start scheduler`.
+   `--force` replaces the whole `bronze_klines` table in one commit; files are
+   downloaded and checksum-verified before anything is written.
+3. The first GX cycle can fail `expect_column_max_to_be_between` because the
+   window starts at the pre-stop success and the streams were paused. It
+   self-heals on the next cycle once live data arrives; do not reset offsets.
+4. Trades/candles for the paused days come from the archives (T+1). Ticker
+   microstructure cannot be recovered — there is no historical book archive.
+5. If the bucket accumulated small files, run `make compact` (all medallion
+   tables) during a quiet window. `OPTIMIZE pipeline_metrics` can fail with
+   `ICEBERG_COMMIT_ERROR` while consumers are committing; retry later — its
+   `VACUUM` still succeeds and no data is affected.

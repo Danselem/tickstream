@@ -19,7 +19,8 @@ per-symbol freshness (ADR-021), trailing-window ranges (ADR-022), a stabilizatio
 silent-WS watchdog ADR-025), an archive 1m-kline backfill + unified candle view
 (ADR-026), a readable BTC / 24h-detail + 30d-trend default (ADR-027), explicit
 symbol→partition routing (ADR-028) and a separate @ticker top-of-book stream with
-a 1-minute microstructure model (ADR-029); 20 charts, 117 tests. Deviations from this plan are
+a 1-minute microstructure model (ADR-029); 20 charts, 118 tests. The Oct 2026
+batch-window fix (start the window after metrics) keeps ticker lag bounded. Deviations from this plan are
 recorded in docs/decisions.md (ADR-008 ops tables in `tickstream` DB, ADR-009 MERGE
 `update_condition`, ADR-010 `glue:GetTableVersions`, ADR-012a dashboard slice linkage,
 ADR-013 bronze merge, ADR-014 scale-out, ADR-015 cross-replica idempotency, ADR-016

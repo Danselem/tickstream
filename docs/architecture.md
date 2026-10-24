@@ -67,8 +67,9 @@ flowchart LR
       (gold, unified gold, microstructure + 2 business summaries + 5 ops/health
       tables, never bronze), 20 charts
       across two native tabs — **Market** (candlestick OHLC, price/VWAP, base
-      volume, USD notional, trades/min, volatility, notional-share treemap, 2 KPI
-      tiles, daily & hourly summary tables) and **Pipeline health** (lag, batch
+      volume, USD notional, trades/min, volatility, quoted spread, book
+      imbalance, notional-share treemap, 2 KPI tiles, daily & hourly summary
+      tables) and **Pipeline health** (lag, batch
       rows, quality runs, bronze integrity, rows per layer, per-symbol freshness).
       Native **Symbol** (defaults to the first configured coin, BTC) and **Time
       range** filters (ADR-020/027); 24 h detail + 30 d trend windows (ADR-022/027);

@@ -31,6 +31,20 @@ Model check: 7 coins run ~150–200 events/s (~15M/day). Bronze Parquet ≈ tens
 bytes/row → ~1 GB/day; 30-day retention ≈ tens of GB ≈ single-digit dollars
 all-in. Athena stays in cents while every query prunes to day+symbol partitions.
 
+## Actuals (16–24 Oct 2026)
+
+| Service | Spend | Notes |
+|---|---|---|
+| S3 | $3.28 | 8.9 GB / 59,739 objects before maintenance; 6.9 GB / 55,760 after OPTIMIZE + VACUUM. Requests, not storage, dominate. |
+| Athena | $0.12 | dbt builds + maintenance; GX and integrity checks local. |
+| Glue | $0.00 | Catalog updates only. |
+
+The jump from the first fortnight reflects higher live volume plus many small
+Iceberg files accumulated while the scheduler was stopped (host sleep). One
+maintenance pass cut file count and bytes; running it more often (or lifecycle
+rules) keeps request cost down. The kline backfill added 846,720 rows in a single
+table rewrite; the ticker stream adds ~6 msg/s and is negligible.
+
 ## Recommendations (not yet applied)
 
 - Lifecycle rule on `s3://<bucket>/athena-results/` (expire after 30 days):
