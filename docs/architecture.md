@@ -1,5 +1,8 @@
 # Architecture
 
+[Data flow](#data-flow) · [Delivery semantics](#delivery-semantics) ·
+[Failure modes](#failure-modes-seen-in-practice-and-the-fixes)
+
 ```mermaid
 flowchart LR
     BIN["Binance WS combined stream<br/>7 coins × @trade"] --> PROD[producer<br/>websockets + pydantic<br/>acks=all, idempotent, zstd]
@@ -99,40 +102,31 @@ SIGKILL, 20k replay batch → 2 appended / 19,998 skipped).
 
 ## Failure modes seen in practice (and the fixes)
 
-- **S3 socket timeouts vs short pyarrow defaults** → crash/rebalance livelock.
-  Fixed with tenacity retry (transient-only classification), raised
-  `s3.connect/request-timeout` (15/60 s), `max.poll.interval.ms` 10 min.
-- **`table.upsert` O(table) per batch** → replaced with pruned-scan merge
-  (ADR-013). Lesson: benchmark the write path at 10× expected scale early.
-- **Self-perpetuating 1-row batches** → two control-flow bugs in the same
-  timer. First the window reset at the *start* of the flush, so once a flush
-  outran 45 s every batch flushed at one message (ADR-014). It recurred when the
-  flush reset the window after the write/commit but before a ~40 s metrics
-  append (ADR-030). Fixed by resetting at the very end of `_flush()`; verified
-  live via batch rows, bounded lag and the absence of `rows: 1`. The batcher
-  unit tests cover window semantics; caller ordering is not separately unit-tested.
-- **Partition skew (440k-message lag)** → Kafka's murmur2 hash sent six of seven
-  symbols to partition 0 (BTC+ETH ≈ 74% of volume). Fixed with an explicit
-  symbol→partition map, no topic change or offset reset (ADR-028).
-- **Cross-replica duplication on rebalance (15.8k rows)** → each replica caches
-  its own Iceberg `Table` handle and only sees its own appends, so on a
-  rebalance the new owner replayed a batch the old owner had written and
-  re-appended it. Fixed with `table.refresh()` before the anti-join scan +
-  `cooperative-sticky` + commit-on-revoke (ADR-015); the whole-table integrity
-  check (ADR-016) is the backstop.
-- **Silent WebSocket** → the socket answered pings but delivered no trades for
-  hours; throughput was only logged on arrival, so the silence was invisible.
-  Fixed with a 60 s per-message watchdog (ADR-025).
-- **Kafka single-broker SPOF / host sleep** → the host stopped both Docker and
-  the broker for four days; volume-held data survived, ~1M backlog drained at
-  ~20k/batch on restart. Trades and candles were repaired from Binance archives
-  T+1; ticker history is unrecoverable. Accepted for MVP (multi-broker deferred).
-- **Glue `UpdateTable` timeouts on big MERGE rewrites** → dbt
-  `update_condition` (immutable-event pattern, ADR-009).
-- **IAM least-privilege gaps found by exercising, not by review**:
-  `glue:GetTableVersions` (dbt), `athena:GetTableMetadata`/`ListDatabases`
-  datacatalog-scoped (Superset), PyAthena's lowercase `awsdatacatalog` default
-  vs case-sensitive evaluation (pinned `catalog_name=AwsDataCatalog`).
-- **Superset 6 integration**: config module replaces defaults (`from
-  superset.config import *`), venv without pip, JWT still needs CSRF
-  cookie+header (ADR-011/012).
+Full diagnosis and recovery steps are in the [runbook](runbook.md).
+
+| Symptom | Root cause | Fix |
+|---|---|---|
+| S3 socket timeouts; crash/rebalance livelock | Short pyarrow S3 timeouts on a degraded network | Transient-only tenacity retry; 15/60 s timeouts; `max.poll.interval.ms` 10 min |
+| 440k-message lag, one partition hot | Kafka murmur2 sent 6 of 7 symbols to partition 0 (BTC+ETH ≈ 74%) | Explicit symbol→partition map; no topic change or offset reset (ADR-028) |
+| 15.8k duplicate keys after rebalance | Each replica cached its own Iceberg handle and replayed another replica's batch | `refresh()` before anti-join, cooperative-sticky, commit-on-revoke; integrity backstop (ADR-015/016) |
+| One-row batches forever, lag unbounded | Window reset at flush start (ADR-014), then before a ~40 s metrics append (ADR-030) | Reset at the end of `_flush()`; verified live. Batcher tests cover window semantics, not caller ordering |
+| Stream open but no trades for hours | Pings worked; per-message silence was invisible | 60 s per-message watchdog (ADR-025) |
+| Four-day gap, ~1M backlog | Host sleep stopped Docker and the single broker; volume survived | Drain at ~20k/batch; backfill klines T+1; ticker history is unrecoverable |
+| Glue `UpdateTable` timeouts on MERGE | Rewrote unchanged rows on every lookback | `update_condition` on immutable events (ADR-009) |
+| `table.upsert` O(table) per batch | Full-table merge on every micro-batch | Pruned-scan anti-join merge (ADR-013); benchmark at 10× early |
+| Superset 500s / login or catalog errors | IAM gaps, lowercase `awsdatacatalog`, Superset 6 config/JWT quirks | Add scoped IAM actions; pin `AwsDataCatalog`; config module + CSRF cookie/header (ADR-011/012) |
+| `OPTIMIZE pipeline_metrics` commit error | Four consumers append while maintenance commits | Retry in a quiet window; `VACUUM` still succeeds, data unaffected |
+
+## Repository layout
+
+| Path | Contents |
+|---|---|
+| `src/pipeline/producer`, `consumer` | Binance WebSocket producers and Kafka→Iceberg consumers |
+| `src/pipeline/common` | Typed settings/models, Iceberg catalog and ops-table helpers |
+| `src/pipeline/quality`, `scheduler` | GX/integrity/health checks and the quality → dbt → maintenance loop |
+| `src/pipeline/backfill`, `superset` | Archive kline loader and REST dashboard provisioning |
+| `dbt/models/{staging,silver,gold}` | Typed views, incremental silver/gold models, tests and column docs |
+| `quality/suites` | Great Expectations suite snapshots (reports are gitignored) |
+| `infra`, `superset/` | OpenTofu resources and the derived Superset image/config |
+| `tests/unit`, `tests/integration` | Offline pytest suite and the opt-in Kafka roundtrip |
+| `docs`, `plan.md`, `Brief.md` | Reference docs, ADRs, historical plan and original requirements |

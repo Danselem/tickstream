@@ -1,5 +1,10 @@
 # Runbook
 
+[Prerequisites](#prereqs) · [First-time setup](#first-time-setup) ·
+[Daily commands](#daily-commands) · [Incidents](#incidents-and-how-they-were-fixed) ·
+[Maintenance](#maintenance-and-compaction) · [Backfills](#kline-backfill-history-for-charts-adr-026) ·
+[Host recovery](#after-a-host-stop-or-sleep-docker-daemon-down) · [Teardown](#tear-down)
+
 ## Prereqs
 
 - Python 3.12 via `uv` (`uv python install 3.12`), Docker, OpenTofu ≥ 1.9, AWS CLI.
@@ -53,52 +58,22 @@ service has its own image: rebuilding `consumer` does **not** update
 
 ## Incidents and how they were fixed
 
-- **Consumer crash loop (S3 timeouts).** Symptom: container restarts every few
-  minutes, `OSError curlCode: 28` in logs, Kafka lag explodes, rebalances.
-  Cause: short pyarrow S3 timeouts vs degraded Docker networking. Fix: transient
-  retry (`common/retry.py`), raised timeouts, `max.poll.interval.ms` 10 min.
-  Check: `docker compose logs consumer | grep -c Retrying`.
-- **Consumer stall (1-row batches).** Symptom: `batch_committed` shows `rows=1`
-  every ~40 s, the committed offset advances by 1, `max_event_time` frozen,
-  lag grows. Three causes seen: (a) a librdkafka stuck state after violent
-  restart churn — cured by restarting that replica; (b) the window reset before
-  the write/commit (ADR-014); (c) the window reset before the ~40 s ops-metrics
-  append (ADR-030, fixed in `c9188bd`). The current code resets only at the end
-  of `_flush()`. Check `docker logs tickstream-consumer-1 | grep batch_committed
-  | tail`; the batcher unit tests cover window semantics, but caller ordering is
-  verified live, so inspect `_flush()` if it recurs.
-- **Lag not draining / uneven.** Each replica owns one partition. Symbols are
-  pinned explicitly by `TICKSTREAM_SYMBOL_PARTITIONS` (ADR-028): BTC→1,
-  ETH/DOGE/LINK→2, SOL/ADA/AVAX→0. If the mix changes, the map may need
-  rebalancing. Watch per-partition lag: `docker compose exec kafka
-  /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server localhost:9092
-  --describe --group bronze-writer`. Never scale beyond the partition count (3).
-- **Kafka broker died (exit 137, host outage).** Data survives on the
-  `kafka-data` volume; `docker compose up -d kafka` recovers. ~1M backlog then
-  drains at ~20k/batch — watch `lag_messages` in consumer logs. Freshness gate
-  stays red until fresh timestamps commit (expected; self-heals).
-- **dbt Glue timeout on MERGE.** `update_condition` skips identical rows
-  (ADR-009). If a MERGE ever times out again, suspect lookback size first.
-- **GX failing.** Read `quality/reports/<latest>.json`: `failed_expectations`
-  names the check. Freshness failures after downtime heal once fresh data lands.
-  A failed run does NOT advance the scan window. If it's
-  `expect_column_values_to_be_unique` on bronze `unique_key`, see the dedup
-  procedure below (cross-replica duplication, ADR-015).
-- **Superset 500s on dataset sync.** Almost always IAM (`athena:GetTableMetadata`
-  / `ListDatabases` datacatalog-scoped) or `catalog_name` case — see ADR-012.
-  Server traceback: `docker logs tickstream-superset | grep -A15 datasets/api.py`.
-- **Superset login fails after rebuild.** Metadata DB lives on the
-  `superset-home` volume; admin persists. If the volume was deleted, bootstrap
-  recreates the admin from `.env`.
-- **Code change appears to have no effect.** The services run baked images, not
-  host mounts. Rebuild the right image and recreate that service:
-  `docker compose build ticker-consumer && docker compose up -d --no-deps
-  --force-recreate ticker-consumer`. Remember `ticker-consumer` is a separate
-  image from `consumer`.
-- **Dashboard charts are empty after a fresh boot.** Superset provisioning can
-  finish before the first dbt build, so datasets exist but gold tables are empty.
-  Wait for the first GX → dbt cycle (~30–35 min), then reload; `make dbt-build`
-  followed by `make superset` also fixes it.
+Start with the symptom, then run the first check. The
+[architecture](architecture.md#failure-modes-seen-in-practice-and-the-fixes)
+doc explains why these failures happen.
+
+| Symptom | First check | Fix |
+|---|---|---|
+| Consumer restarts every few minutes; `OSError curlCode: 28`; lag and rebalances | `docker compose logs consumer` and count retries | Transient-only retry, raised S3 timeouts, `max.poll.interval.ms` 10 min |
+| `batch_committed` shows `rows=1`; offset advances by 1; `max_event_time` frozen | `docker logs tickstream-consumer-1` and look for `batch_committed` | Restart a librdkafka-stuck replica; otherwise inspect `_flush()` ordering (ADR-014/030). Reset only at the end of the flush |
+| Lag is uneven or not draining | `kafka-consumer-groups.sh --describe --group bronze-writer` | Symbols are pinned (BTC→1, ETH/DOGE/LINK→2, SOL/ADA/AVAX→0); rebalance the map if the mix changes. Never scale above 3 |
+| Kafka broker died (exit 137, host outage) | `docker compose up -d kafka`; check the `kafka-data` volume | Backlog drains at ~20k/batch; freshness self-heals once fresh timestamps commit |
+| dbt Glue timeout on MERGE | Check the affected model and lookback | `update_condition` skips identical rows (ADR-009); suspect lookback size first |
+| GX failing | `quality/reports/<latest>.json` and `failed_expectations` | Freshness failures heal after fresh data; duplicate-key failures use the dedup section below. A failed run does not advance the window |
+| Superset 500s on dataset sync | `docker logs tickstream-superset` and the traceback | Almost always IAM (`GetTableMetadata`/`ListDatabases`) or catalog case (ADR-012) |
+| Superset login fails after rebuild | Check the `superset-home` volume | Admin persists on the volume; if deleted, bootstrap recreates it from `.env` |
+| Code change appears to have no effect | Check which image the service runs | Baked images, not host mounts. Rebuild and recreate the exact service; `ticker-consumer` is a separate image |
+| Charts empty after a fresh boot | Check whether gold tables exist | Superset may provision before the first dbt build; wait for GX → dbt, or run `make dbt-build` then `make superset` |
 
 ## Maintenance and compaction
 
@@ -218,18 +193,13 @@ the lake bucket first (`force_destroy = false` blocks destroying a non-empty buc
 
 1. Start Docker Desktop and `make up`; the Kafka volume and consumer offsets
    survive, producers reconnect automatically (check `ws_connected`).
-2. Stop the scheduler while repairing history:
-   `docker compose stop scheduler` → `make backfill FORCE=1` (defaults to the
-   first of the month 60 days ago through *yesterday*) → `make dbt-build` →
-   `docker compose start scheduler`.
-   `--force` replaces the whole `bronze_klines` table in one commit; files are
-   downloaded and checksum-verified before anything is written.
+2. Repair history: `docker compose stop scheduler` → `make backfill FORCE=1` →
+   `make dbt-build` → `docker compose start scheduler`. Defaults and replacement
+   semantics are in [Kline backfill](#kline-backfill-history-for-charts-adr-026).
 3. The first GX cycle can fail `expect_column_max_to_be_between` because the
    window starts at the pre-stop success and the streams were paused. It
    self-heals on the next cycle once live data arrives; do not reset offsets.
 4. Trades/candles for the paused days come from the archives (T+1). Ticker
    microstructure cannot be recovered — there is no historical book archive.
-5. If the bucket accumulated small files, run `make compact` (all medallion
-   tables) during a quiet window. `OPTIMIZE pipeline_metrics` can fail with
-   `ICEBERG_COMMIT_ERROR` while consumers are committing; retry later — its
-   `VACUUM` still succeeds and no data is affected.
+5. If the bucket accumulated small files, run `make compact` during a quiet
+   window; see [maintenance](#maintenance-and-compaction).

@@ -1,5 +1,9 @@
 # Build Plan — `tickstream` (Binance → Kafka → Iceberg → dbt → Superset)
 
+> **Historical build plan (Oct 2026).** Kept for decision context, not as a
+> runbook. Current behavior is in the [README](README.md),
+> [architecture](docs/architecture.md), and [ADRs](docs/decisions.md).
+
 Status: **Phases 0–4 complete** (Oct 2026), plus post-phase hardening through
 ADR-030. The specification below is the original build plan; the current
 behavior lives in the [README](README.md) and the

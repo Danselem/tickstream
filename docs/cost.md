@@ -1,5 +1,9 @@
 # Cost
 
+**Bottom line:** $3.40 for 16–24 Oct, about **$11–12/month** at the current
+volume. Storage is cents; S3 requests from many small objects dominate the bill.
+The $20 budget alert leaves headroom.
+
 Guardrails (Brief §10). Estimates became actuals once the pipeline ran.
 
 ## Guardrails
@@ -50,10 +54,9 @@ excluding the unrelated RDS line in the same account. S3 includes both the lake
 and `athena-results/`. The window included recovery/backfill, so it is not a
 steady-state month.
 
-**Run-rate.** $3.40 / 9 days ≈ $0.38/day ≈ **$11–12/month** at this volume;
-steady state without backfill and with regular compaction should be lower. The
-$20 budget alert leaves headroom. Storage is still cents — the bill is dominated
-by PUT/GET requests from many small objects.
+Steady state without backfill and with regular compaction should be lower.
+Storage is still cents; the bill is dominated by PUT/GET requests from many
+small objects.
 
 ## Recommendations (not yet applied)
 
@@ -65,9 +68,6 @@ by PUT/GET requests from many small objects.
   object counts do not spike; measure Cost Explorer before/after.
 - If dashboards go multi-user: Athena provisioned capacity or result reuse;
   Superset query caching + Postgres metadata.
-
-## What I'd change at scale
-
-S3 Tables auto-compaction instead of scheduled OPTIMIZE; Athena
-capacity pricing when concurrent; lifecycle-tiering bronze to Infrequent Access
-after N days; per-workgroup cost allocation tags.
+- At larger scale: S3 Tables auto-compaction instead of scheduled `OPTIMIZE`,
+  Athena capacity pricing, lifecycle-tiering bronze to Infrequent Access, and
+  per-workgroup cost allocation tags.
