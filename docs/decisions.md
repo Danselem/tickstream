@@ -1,9 +1,48 @@
 # Design decisions (ADRs)
 
 Short records of each non-obvious choice: context, decision, consequence.
+Accepted records are not rewritten; when a decision changes, a new ADR supersedes
+or amends the old one and the status below is updated. `ADR-012a` is an addendum
+kept at its historical position.
+
+| ADR | Decision | Status |
+|---|---|---|
+| [ADR-001](#adr-001--bronze-idempotency-via-upsert-not-append-only) | Bronze idempotency via upsert, not append-only | Superseded on the write path by ADR-013 (key unchanged) |
+| [ADR-002](#adr-002--great-expectations-validates-a-local-pyiceberg-scan) | GX validates a local PyIceberg scan | Accepted |
+| [ADR-003](#adr-003--opentofu-state-in-s3--dynamodb-bootstrapped-once) | OpenTofu state in S3 + DynamoDB | Accepted |
+| [ADR-004](#adr-004--single-broker-kraft-kafka-rf1) | Single-broker KRaft Kafka, RF=1 | Accepted |
+| [ADR-005](#adr-005--real-aws-only-offline-covered-by-pytest-not-by-compose) | Real AWS only; offline covered by pytest | Accepted |
+| [ADR-006](#adr-006--kafka-topic-3-partitions-symbol-keys-7-day-retention) | Kafka topic: 3 partitions, symbol keys, 7-day retention | Amended by ADR-014 (consumer count) |
+| [ADR-007](#adr-007--one-micro-batch-commit--one-iceberg-snapshotfile-for-now) | One micro-batch = one Iceberg snapshot/file | Accepted (implemented by scheduled OPTIMIZE/VACUUM) |
+| [ADR-008](#adr-008--ops-tables-live-in-the-tickstream-glue-database) | Ops tables in the `tickstream` Glue database | Accepted |
+| [ADR-009](#adr-009--dbt-merges-carry-an-update_condition-immutable-event-pattern) | dbt MERGEs carry an `update_condition` | Accepted |
+| [ADR-010](#adr-010--one-iam-addition-for-dbt-gluegettableversions) | One IAM addition for dbt: `glue:GetTableVersions` | Accepted |
+| [ADR-011](#adr-011--superset-dashboard-as-code-via-a-rest-provision-script) | Dashboard as code via REST provisioning | Accepted |
+| [ADR-012](#adr-012--superset-on-athena-gotchas-config-drivers-iam-catalog-case) | Superset-on-Athena gotchas | Accepted |
+| [ADR-012a](#adr-012a--dashboardchart-linkage-on-superset-60-and-the--in-chart-names) | Dashboard↔chart linkage on Superset 6.0 | Accepted |
+| [ADR-013](#adr-013--bronze-write-path-pruned-scan-merge-transient-retry-s3-timeouts) | Bronze write path: pruned-scan merge, retry, timeouts | Accepted |
+| [ADR-014](#adr-014--consumer-scale-out-to-3-replicas--batching-window-fix) | Consumer scale-out to 3 replicas + batching window | Amended by ADR-030 (metrics ordering) |
+| [ADR-015](#adr-015--cross-replica-duplication-on-rebalance-refresh-before-scan--revoke-commit) | Cross-replica duplication on rebalance | Accepted |
+| [ADR-016](#adr-016--whole-table-integrity-check-on-the-maintenance-cadence) | Whole-table integrity check | Accepted |
+| [ADR-017](#adr-017--business-gold-summary--tabbed-dashboard-two-audiences) | Business gold summary + tabbed dashboard | Accepted |
+| [ADR-018](#adr-018--dashboard-readability-explicit-labels-legends-and-stable-tab-ids) | Dashboard readability | Accepted |
+| [ADR-019](#adr-019--dimension-views-dim_symbol-dim_time) | Dimension views | Accepted |
+| [ADR-020](#adr-020--market-overview--native-dashboard-filters) | Market overview + native filters | Accepted |
+| [ADR-021](#adr-021--lake-level-health-per-layer-row-counts-and-per-symbol-freshness) | Lake-level health | Accepted |
+| [ADR-022](#adr-022--trailing-time-windows-for-provisioned-charts-now-nd--now) | Trailing time windows | Accepted |
+| [ADR-023](#adr-023--repair-bronze-duplicates-server-side-delete-both--insert-one) | Repair bronze duplicates server-side | Accepted |
+| [ADR-024](#adr-024--incremental-windows-anchor-on-the-target-with-overridable-lookbacks) | Target-anchored incremental windows | Accepted |
+| [ADR-025](#adr-025--treat-a-silent-websocket-as-dead-message-watchdog) | Treat a silent WebSocket as dead | Accepted |
+| [ADR-026](#adr-026--archive-1m-klines-backfill-for-chart-history-bronze_klines) | Archive 1m klines backfill | Accepted |
+| [ADR-027](#adr-027--readable-default-view-btc-24-h-detail--30-d-trend) | Readable default view | Accepted |
+| [ADR-028](#adr-028--explicit-symbolpartition-routing-for-tradesraw) | Explicit symbol→partition routing | Accepted |
+| [ADR-029](#adr-029--separate-ticker-stream-for-top-of-book-microstructure) | Separate `@ticker` stream | Accepted |
+| [ADR-030](#adr-030--start-the-batch-window-after-the-whole-flush) | Start the batch window after the whole flush | Accepted |
 
 ## ADR-001 — Bronze idempotency via upsert, not append-only
 
+- Status: superseded on the write path by ADR-013; the merge key
+  `(symbol, trade_id)` and the "raw means no enrichment" definition still hold.
 - Context: delivery is at-least-once; AGENTS.md says bronze is "raw, never modified"
   while Brief §9 asks for idempotent writes using MERGE on Iceberg.
 - Decision: the consumer upserts each micro-batch on `(symbol, trade_id)` with
@@ -48,6 +87,8 @@ Short records of each non-obvious choice: context, decision, consequence.
 
 ## ADR-006 — Kafka topic: 3 partitions, symbol keys, 7-day retention
 
+- Status: accepted; the "single consumer" assumption is superseded by ADR-014,
+  while the topic size, key and retention are unchanged.
 - Context: one symbol today, 6–7 tomorrow; single consumer; replays must be possible.
 - Decision: `trades.raw` with 3 partitions (never shrinkable later), key = symbol
   (all XRP lands in one partition today; coins spread later), 7-day retention for
@@ -106,7 +147,7 @@ Short records of each non-obvious choice: context, decision, consequence.
   (UUIDs, layout nodes) is fiddlier than the v1 REST API, which is stable and
   introspectable. `src/pipeline/superset/provision.py` (stdlib + urllib only,
   unit-tested with a fake transport) creates/updates the Athena database,
-  datasets, 5 charts and the dashboard — idempotent, runs at container boot and
+  datasets, an initial 5 charts and the dashboard — idempotent, runs at container boot and
   via `make superset`.
 - Decision: REST provisioning, not export-ZIP. Datasets point at gold + ops
   tables only, never bronze.
@@ -137,7 +178,7 @@ Short records of each non-obvious choice: context, decision, consequence.
   principal, check CloudTrail, read the driver source in the image.
 - Consequence: dataset sync + SQL Lab verified working; dashboard shows live data.
 
-### ADR-012a — Dashboard↔chart linkage on Superset 6.0 (and the `+` in chart names)
+## ADR-012a — Dashboard↔chart linkage on Superset 6.0 (and the `+` in chart names)
 - Context: the dashboard rendered every tile as "There is no chart definition
   associated with this component, could it have been deleted?". Root cause: in
   Superset **6.0.0** the dashboard **write** schemas have no `charts` field (it
@@ -192,6 +233,7 @@ Short records of each non-obvious choice: context, decision, consequence.
 
 ## ADR-014 — Consumer scale-out to 3 replicas + batching-window fix
 
+- Status: accepted; amended by ADR-030 (the window must start after metrics too).
 - Context: after the 7-coin launch the single consumer could not keep up
   (~330–660 rows/s vs 7 streams), so the backlog grew. Diagnosis found three
   independent problems, only one of them capacity:
@@ -275,14 +317,14 @@ Short records of each non-obvious choice: context, decision, consequence.
     of the whole bronze table via local PyIceberg (zero Athena cost), computes
     `duplicates = total_rows - distinct_keys`, and appends one row to a new
     `tickstream.integrity_results` ops table (ADR-008 conventions).
-  - The scheduler runs it on the **maintenance cadence** (every N cycles, ≈12 h),
-    *before* dbt; `duplicates > 0` fails the cycle and blocks dbt (Brief §6),
-    matching the "a failure stops the run" rule.
+  - The scheduler runs it on the **maintenance cadence** (`MAINTENANCE_EVERY_N_RUNS=72`,
+    ≈1.5–2 days at the current ~34 min cycle), *before* dbt; `duplicates > 0` fails
+    the cycle and blocks dbt (Brief §6), matching the "a failure stops the run" rule.
   - Exposed ad hoc as `make integrity` (`--integrity-only`).
 - Consequence: keeps the frequent/cheap windowed gate AND a whole-table safety
   net, with no extra Athena spend (~19 s to scan 4.3M key rows). Trade-off: the
   whole-table scan is O(table) in Python, so it is deliberately NOT run every
-  10 min; a duplicate could persist up to one maintenance interval before the
+  cycle; a duplicate could persist up to one maintenance interval before the
   run blocks. `integrity_results` also plots duplicate-rate over time in Superset.
 
 ## ADR-017 — Business gold summary + tabbed dashboard (two audiences)
@@ -501,11 +543,13 @@ Short records of each non-obvious choice: context, decision, consequence.
   - The offline load is gated by the SHA256 sidecars plus dbt tests (unique
     `(symbol, open_time)`, non-null/positive OHLC, `high >= low`, volume ≥ 0),
     not by the live GX window (which stays scoped to the last successful gate).
-- Consequence: 806,400 candles (Aug 1–Oct 19 2026, 7 symbols) loaded in ~18 min;
-  the Market tab now has a real 30-day trend and dense 24 h detail, and today's
-  live tail wins over the archive when both exist. Trade-offs: the archive is
-  T+1 (today is live-only), `volatility` cannot be reconstructed from klines so
-  that chart stays on the live table, and XRP (dropped from config) has no
+- Consequence: the first load covered 806,400 candles (Aug 1–Oct 19 2026,
+  7 symbols) in ~18 min; the Oct 2026 recovery rerun (Aug 1–Oct 23) loaded
+  **846,720 rows** and replaced the table atomically. The Market tab now has a
+  real 30-day trend and dense 24 h detail, and today's live tail wins over the
+  archive when both exist. Trade-offs: the archive is T+1 (today is live-only
+  until the next daily file), `volatility` cannot be reconstructed from klines
+  so that chart stays on the live table, and XRP (dropped from config) has no
   archive rows. Backfill is manual (`make backfill`), documented in the runbook.
 
 ## ADR-027 — Readable default view: BTC, 24 h detail + 30 d trend
@@ -547,7 +591,8 @@ Short records of each non-obvious choice: context, decision, consequence.
   ~195 msg/s while new traffic there is light. The drained rows land in bronze
   late, so a one-off silver/gold catch-up with wider lookbacks is needed
   afterwards. The map is volume-dependent: revisit it when the symbol mix or
-  trade rates change materially (and before adding the `@ticker` stream).
+  trade rates change materially. The `@ticker` stream added later uses its own
+  topic and consumer (ADR-029), so it does not change this routing.
 
 ## ADR-029 — Separate `@ticker` stream for top-of-book microstructure
 
@@ -558,7 +603,7 @@ Short records of each non-obvious choice: context, decision, consequence.
 - Decision: keep it off the trade hot path.
   - A second producer process (`ticker-producer`) opens its own combined
     `<symbol>@ticker` connection and writes `ticker.raw` (3 partitions,
-    key=symbol). A second consumer (`ticker-consumer`, one replica — ~7 msg/s)
+    key=symbol). A second consumer (`ticker-consumer`, one replica — ~5–7 msg/s)
     MERGEs into `bronze_tickers`, partitioned by event day + symbol and
     idempotent on `(symbol, event_time)`.
   - The GX gate validates the ticker table over the same window (unique
@@ -569,8 +614,36 @@ Short records of each non-obvious choice: context, decision, consequence.
     bid/ask quantity, imbalance in [-1, 1], last price, snapshot count; 30-min
     recompute). Two charts on the Market tab, scoped by the Symbol filter.
 - Consequence: quoted spread/depth are queryable next to realized prices with
-  negligible load (7 msg/s, ~460-row batches, ~11 s commits). The trade
-  producer's reconnect/partition logic is untouched. Trade-off: a snapshot is
+  negligible load (~5–7 msg/s, ~500-row batches, ~20–25 s commits measured
+  under concurrent Glue metadata updates). The trade producer's
+  reconnect/partition logic is untouched. Trade-off: a snapshot is
   keyed to the event second, so two updates within the same millisecond would
   collapse; Binance emits at most one per second per symbol. `@ticker` is a
   1 Hz sample, not a full book — depth beyond the top level is out of scope.
+
+## ADR-030 — Start the batch window after the whole flush
+
+- Status: accepted; amends ADR-014 (which had moved the window after the
+  write + commit but not after the ops-metrics append).
+- Context: ADR-014 fixed the self-perpetuating 1-row batch by moving
+  `start_window()` out of `drain()` and after the write + offset commit. The
+  flush still did one more blocking step afterwards: `ops.append_metrics()`
+  writes a row to the Iceberg `pipeline_metrics` table, which took up to ~40 s
+  when four consumers were committing metadata concurrently. If the whole flush
+  (write + commit + metrics) exceeded the 45 s window, the next window was
+  already expired when `_flush()` returned, so the consumer again flushed one
+  message at a time. It recurred in Oct 2026 on the ticker consumer (one row per
+  ~40 s, lag growing without bound) and looked like a stuck client rather than
+  control flow.
+- Decision: reset the window at the very end of `_flush()`, after the
+  best-effort metrics append (which catches and logs its own failures). The
+  invariant is "start timing the next batch when the consumer is actually ready
+  to collect it", not "after the write" or "after the commit". Metrics failures
+  are still swallowed; only their latency is now inside the completed cycle
+  rather than before the reset.
+- Consequence: trade and ticker batches return to full size (ticker ~500 rows,
+  trade replicas 250–2,200 rows at commit) and lag stays bounded (~100–500
+  in-flight). The tradeoff is that a slow metrics append delays the next batch
+  just as it did before — but it can no longer shrink every subsequent batch.
+  The batcher unit tests cover window semantics; the caller ordering is verified
+  live (batch rows, lag, and the absence of `rows: 1` in `batch_committed`).
