@@ -61,4 +61,5 @@ Run `make lint typecheck test` before finishing any task.
 - Work in phases: infra, XRP ingestion, dbt and quality, Superset, expansion, docs. Finish and verify one phase before starting the next.
 - Small, focused commits with clear messages. Add or update tests with every change.
 - If a requirement is unclear or a choice affects architecture, ask before building.
-- Document each non-obvious design decision briefly in `docs/decisions.md`.
+- Document each non-obvious design decision briefly in `docs/decisions.md`; supersede, do not rewrite, accepted ADRs.
+- Keep the README, architecture diagram, runbook, cost figures and ADR index in sync when behavior, counts or cadence change.

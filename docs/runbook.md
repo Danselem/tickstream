@@ -21,17 +21,35 @@
 ## Daily commands
 
 See `make help`. `make up` / `make down` / `make logs`; `make quality` /
-`make dbt-build` / `make maintenance`; `make integrity` (whole-table duplicate
-check; also runs automatically on maintenance cycles); `make superset` re-runs
-dashboard provisioning against the live container (idempotent).
+`make dbt-build` / `make maintenance` / `make compact`; `make integrity`
+(whole-table duplicate check; also runs automatically every 72 cycles);
+`make health` (row counts + freshness); `make superset` re-runs dashboard
+provisioning against the live container (idempotent). Integration tests are
+opt-in: `RUN_KAFKA_TESTS=1 uv run pytest -m integration`.
+
+**Images are baked, not mounted.** A code change needs
+`docker compose build <service>` and
+`docker compose up -d --no-deps --force-recreate <service>`. Each `build: .`
+service has its own image: rebuilding `consumer` does **not** update
+`ticker-consumer` (`tickstream-ticker-consumer`). Scaled consumers are
+`tickstream-consumer-1/2/3`; read them with `docker logs tickstream-consumer-1`
+(the `docker compose logs consumer-1` form does not exist).
 
 ## Dashboards
 
 - URL http://localhost:8088 → dashboard `tickstream` (published).
-- Charts: price/volume/volatility per symbol (groupby), consumer lag + batch
-  rows, recent quality runs. Datasets: `gold_candles_1m`, `quality_results`,
-  `pipeline_metrics` (never raw bronze).
-- After changing `TICKSTREAM_SYMBOLS`, run `make superset` to refresh charts.
+- **Market** tab: candlestick, price/VWAP, volume, USD notional, trades/min,
+  volatility, quoted spread, book imbalance, treemap, two KPI tiles, daily &
+  hourly summaries (24 h detail + 30 d trend).
+- **Pipeline health** tab: lag, batch rows, quality runs, bronze integrity, rows
+  per layer, per-symbol freshness. Datasets: 10 total, never raw bronze.
+- Native **Symbol** filter defaults to BTC and scopes the Market charts; **Time
+  range** is global. XRP remains queryable but is excluded from the filter list.
+- After changing `TICKSTREAM_SYMBOLS` or `provision.py`: rebuild the Superset
+  image (`docker compose build superset`) and run `make superset`; the target
+  executes the image's baked script, not the host file. If charts are empty
+  after a fresh boot, gold has not been built yet — wait for the first
+  GX → dbt cycle or run `make dbt-build`.
 
 ## Incidents and how they were fixed
 
@@ -42,17 +60,19 @@ dashboard provisioning against the live container (idempotent).
   Check: `docker compose logs consumer | grep -c Retrying`.
 - **Consumer stall (1-row batches).** Symptom: `batch_committed` shows `rows=1`
   every ~40 s, the committed offset advances by 1, `max_event_time` frozen,
-  lag grows. Two causes seen: (a) a librdkafka stuck state after violent restart
-  churn — cured by `docker compose restart consumer`; (b) the batching-window
-  bug fixed in ADR-014. If it recurs, restart the replica(s) and check
-  `make lint typecheck test` still covers the batcher regression.
-  Check: `docker compose logs consumer | grep batch_committed | tail`.
-- **Lag not draining / uneven.** Each replica owns one partition; `trades.raw`
-  partition 0 carried the historical XRP backlog and drains slower. Watch
-  per-partition lag: `docker compose exec kafka /opt/kafka/bin/\
-  kafka-consumer-groups.sh --bootstrap-server localhost:9092 --describe \
-  --group bronze-writer`. `make up` runs 3 consumer replicas (`--scale
-  consumer=3`); never scale beyond the partition count (3).
+  lag grows. Three causes seen: (a) a librdkafka stuck state after violent
+  restart churn — cured by restarting that replica; (b) the window reset before
+  the write/commit (ADR-014); (c) the window reset before the ~40 s ops-metrics
+  append (ADR-030, fixed in `c9188bd`). The current code resets only at the end
+  of `_flush()`. Check `docker logs tickstream-consumer-1 | grep batch_committed
+  | tail`; the batcher unit tests cover window semantics, but caller ordering is
+  verified live, so inspect `_flush()` if it recurs.
+- **Lag not draining / uneven.** Each replica owns one partition. Symbols are
+  pinned explicitly by `TICKSTREAM_SYMBOL_PARTITIONS` (ADR-028): BTC→1,
+  ETH/DOGE/LINK→2, SOL/ADA/AVAX→0. If the mix changes, the map may need
+  rebalancing. Watch per-partition lag: `docker compose exec kafka
+  /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server localhost:9092
+  --describe --group bronze-writer`. Never scale beyond the partition count (3).
 - **Kafka broker died (exit 137, host outage).** Data survives on the
   `kafka-data` volume; `docker compose up -d kafka` recovers. ~1M backlog then
   drains at ~20k/batch — watch `lag_messages` in consumer logs. Freshness gate
@@ -70,6 +90,52 @@ dashboard provisioning against the live container (idempotent).
 - **Superset login fails after rebuild.** Metadata DB lives on the
   `superset-home` volume; admin persists. If the volume was deleted, bootstrap
   recreates the admin from `.env`.
+- **Code change appears to have no effect.** The services run baked images, not
+  host mounts. Rebuild the right image and recreate that service:
+  `docker compose build ticker-consumer && docker compose up -d --no-deps
+  --force-recreate ticker-consumer`. Remember `ticker-consumer` is a separate
+  image from `consumer`.
+- **Dashboard charts are empty after a fresh boot.** Superset provisioning can
+  finish before the first dbt build, so datasets exist but gold tables are empty.
+  Wait for the first GX → dbt cycle (~30–35 min), then reload; `make dbt-build`
+  followed by `make superset` also fixes it.
+
+## Maintenance and compaction
+
+- The scheduler runs `OPTIMIZE … REWRITE DATA USING BIN_PACK` + `VACUUM` every
+  72 cycles (~1.5–2 days at the current ~34 min cycle); `make maintenance` and
+  `make compact` run the same work on demand.
+- Do not run compaction during a backlog drain or a backfill; it races writers
+  and wastes requests. `make compact TABLES=bronze_trades,silver_trades` narrows
+  the scope.
+- `OPTIMIZE pipeline_metrics` can fail with `ICEBERG_COMMIT_ERROR` while four
+  consumers append metadata concurrently. Its `VACUUM` still succeeds and no
+  data is affected; retry in a quiet window.
+- After a large load or backfill, compact and then check object counts in S3.
+  Small files, not bytes, drive the S3 request bill (see `docs/cost.md`).
+
+## Add a symbol
+
+1. Add the uppercase symbol to `TICKSTREAM_SYMBOLS` in `.env` and map it to a
+   partition in `TICKSTREAM_SYMBOL_PARTITIONS` (keep the three partitions
+   balanced; unmapped symbols fall back to the murmur2 hash).
+2. `make restart` (rebuilds and recreates with the new env) and confirm
+   `ws_connected` plus `batch_committed` for both streams.
+3. `make superset` after the Superset image is rebuilt if `provision.py` changed;
+   the Symbol filter picks up configured coins.
+4. For history, run `make backfill FORCE=1` with the default full symbol list
+   (`SYMBOLS` narrows the download but the table replacement covers only the
+   selected symbols), then `make dbt-build`. The archive is T+1 and has no
+   order-book data.
+
+## Rotate secrets
+
+- `SUPERSET_SECRET_KEY` (`.env`): replacing it invalidates existing sessions.
+  Recreate the Superset container (`docker compose up -d --no-deps
+  --force-recreate superset`), then log in again. Never commit `.env`.
+- AWS access keys: create a new key for `tickstream-pipeline`, update `.env`,
+  recreate the Python services, verify `make health`, then deactivate the old
+  key. `.env.example` contains placeholders only.
 
 ## Bronze dedup procedure (one-time, ADR-015)
 
@@ -94,7 +160,7 @@ miss duplicates outside its window.
    ```
    `make dedup-key KEY=BTCUSDT:123` / `make dedup-bronze DAYS=3` use PyIceberg
    instead; they are only practical on a small/compacted table (a 3-day rewrite
-   of the current 4k-file bronze did not finish in 15 min).
+   of the uncompacted bronze did not finish in 15 min).
 4. `make up` (`--scale consumer=3`) to restart the fixed image.
 5. Re-check: `c == d`, then `make quality` (uniqueness gate green) and
    `make dbt-build`.
@@ -107,6 +173,8 @@ miss duplicates outside its window.
 3. Don't run `make maintenance` mid-drain (OPTIMIZE races the writer;
    harmless but wasteful — CommitFailed retries).
 4. When `max(event_time)` is fresh: `make quality && make dbt-build && make superset`.
+   If application code changed, rebuild that service's image first; `make superset`
+   runs the baked provisioning script.
 5. Verify dashboard numbers move; commit nothing until green.
 
 ## Tear down
@@ -117,24 +185,30 @@ the lake bucket first (`force_destroy = false` blocks destroying a non-empty buc
 
 ## Kline backfill (history for charts, ADR-026)
 
-1. `make backfill` — defaults to the first day of the month 60 days ago through
+1. Stop the scheduler first (`docker compose stop scheduler`); dbt must not read
+   the table while it is being replaced.
+2. `make backfill` — defaults to the first day of the month 60 days ago through
    yesterday, for every `TICKSTREAM_SYMBOLS` entry. Narrow it with
-   `START=2026-08-01 END=2026-10-19 SYMBOLS=BTCUSDT`.
-2. Re-running replaces the whole table only with `FORCE=1` (otherwise it skips
-   when rows exist, so an accidental run cannot duplicate history).
-3. Then `make dbt-build` (creates `silver_klines`, `gold_candles_1m_hist`, the
-   `gold_candles_1m_unified` view and runs the kline tests) and
-   `make superset` (dataset/charts). Verify in Athena:
+   `START=2026-08-01 END=2026-10-23 SYMBOLS=BTCUSDT`.
+3. `FORCE=1` **replaces the whole `bronze_klines` table** in one commit; files
+   and SHA256 checksums are validated before anything is written. Without
+   `FORCE` it skips when rows exist, so an accidental run cannot duplicate
+   history — but it also cannot extend an existing table partially.
+4. Then `make dbt-build` (creates `silver_klines`, `gold_candles_1m_hist`, the
+   `gold_candles_1m_unified` view and runs the kline tests), followed by
+   `make compact` and `docker compose start scheduler`. Verify in Athena:
    `SELECT source, count(*) FROM gold_candles_1m_unified WHERE symbol='BTCUSDT' GROUP BY 1`.
-4. Failures are usually a missing daily file (T+1) or a checksum mismatch; the
+5. Failures are usually a missing daily file (T+1) or a checksum mismatch; the
    log names the URL. Today's UTC day is live-only until tomorrow's archive.
+   The Oct 2026 recovery rerun loaded 846,720 rows for Aug 1–Oct 23.
 
 ## Ticker stream (`@ticker`, ADR-029)
 
 - Services: `ticker-producer` → `ticker.raw` → `ticker-consumer` →
   `bronze_tickers`. Check `docker logs tickstream-ticker-producer` for
-  `ws_connected`/`ws_throughput` (expect ~7 msg/s) and
-  `docker logs tickstream-ticker-consumer` for `batch_committed`.
+  `ws_connected`/`ws_throughput` (expect ~5–7 msg/s) and
+  `docker logs tickstream-ticker-consumer` for `batch_committed` (~500 rows,
+  ~20–25 s per commit).
 - Verify: `SELECT max(event_time) FROM tickstream.bronze_tickers` should be
   within a minute; `make dbt-build` creates `silver_tickers` and
   `gold_market_microstructure_1m`. The GX gate skips the ticker suite only if

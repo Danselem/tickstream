@@ -1,31 +1,41 @@
 # Build Plan — `tickstream` (Binance → Kafka → Iceberg → dbt → Superset)
 
-Status: **Phases 0–4 complete** (Oct 2026). Phase 0: skeleton +
-infra applied. Phase 1: XRP ingestion live (bronze via upsert, restart/SIGKILL
-replay-safe). Phase 2: dbt silver/gold green (33/33), GX gate blocks dbt on failure,
-scheduler loop + OPTIMIZE/VACUUM live. Phase 3a (Superset dashboard) built and verified:
-5 charts + published dashboard, SQL Lab returns live Athena rows (ADR-011/012). Phase 3b
-(7-coin expansion) built: producer on the combined stream, multi-symbol charts, bronze
-write path rewritten to a pruned-scan merge (ADR-013), consumer scaled to 3 replicas and
-the batch-window stall fixed (ADR-014); a rebalance-duplication incident was fixed with
-refresh-before-scan + commit-on-revoke (ADR-015) and repaired once. Phase 4 (docs) done;
-Brief §11 definition-of-done fully checked. Post-phase pass: whole-table integrity check
-(ADR-016), Superset linkage fix (ADR-012a), and a business-facing gold summary +
-two-tab dashboard (ADR-017: Market + Pipeline health). BI polish pass (post-phase):
-explicit chart labels/legends/tab ids (ADR-018), dimension views (ADR-019), Market
-overview + native filters (ADR-020), lake-health metrics — rows per layer and
-per-symbol freshness (ADR-021), trailing-window ranges (ADR-022), a stabilization pass
-(server-side duplicate repair ADR-023, target-anchored incremental windows ADR-024,
-silent-WS watchdog ADR-025), an archive 1m-kline backfill + unified candle view
-(ADR-026), a readable BTC / 24h-detail + 30d-trend default (ADR-027), explicit
-symbol→partition routing (ADR-028) and a separate @ticker top-of-book stream with
-a 1-minute microstructure model (ADR-029); 20 charts, 118 tests. The Oct 2026
-batch-window fix (start the window after metrics) keeps ticker lag bounded. Deviations from this plan are
-recorded in docs/decisions.md (ADR-008 ops tables in `tickstream` DB, ADR-009 MERGE
-`update_condition`, ADR-010 `glue:GetTableVersions`, ADR-012a dashboard slice linkage,
-ADR-013 bronze merge, ADR-014 scale-out, ADR-015 cross-replica idempotency, ADR-016
-whole-table integrity check, ADR-017 business summary + tabs, ADR-018 dashboard
-readability, ADR-019 dimension views, ADR-020 market overview + native filters).
+Status: **Phases 0–4 complete** (Oct 2026), plus post-phase hardening through
+ADR-030. The specification below is the original build plan; the current
+behavior lives in the [README](README.md) and the
+[ADR index](docs/decisions.md).
+
+| Phase | State | Evidence |
+|---|---|---|
+| 0 — Skeleton + infra | Complete | `make lint typecheck test`; infra applied; budget alert first |
+| 1 — XRP ingestion | Complete | restart/SIGKILL replay-safe; offsets resume |
+| 2 — Models, quality, schedule | Complete | GX gate blocks dbt; scheduler loop + OPTIMIZE/VACUUM live |
+| 3a — Superset | Complete | REST-provisioned dashboard; SQL Lab returns live Athena rows |
+| 3b — 7-coin expansion | Complete | pruned-scan merge, 3 consumers, rebalance-safe, partition pinning |
+| 4 — Docs | Complete | README + architecture/cost/runbook/ADRs |
+| Post-phase | Complete | integrity (016), tabs (017), filters (020), health (021), backfill (026), ticker (029), batch-window fix (030) |
+
+Current counts: 7 coins, 118 unit tests (integration opt-in), 128 dbt nodes
+(14 models + 114 data tests), 20 Superset charts / 10 datasets, 30 ADRs +
+ADR-012a.
+
+### Brief §11 definition of done
+
+- [x] `make up` starts all local services; OpenTofu provisions AWS.
+- [x] Binance → dashboard with no manual steps (Superset bootstraps and
+  provisions the dashboard).
+- [x] Scheduled GX and dbt runs are green; failures block the build.
+- [x] README has the architecture diagram, setup, design decisions, cost
+  summary and "what I'd change at scale"; Phase 4 lessons learned are included.
+
+Deviations and their rationale are recorded in `docs/decisions.md`
+(ADR-008 ops tables, ADR-009 `update_condition`, ADR-010 IAM addition,
+ADR-012a dashboard linkage, ADR-013 bronze merge, ADR-014 scale-out,
+ADR-015 cross-replica idempotency, ADR-016 integrity, ADR-017 summaries/tabs,
+ADR-018 readability, ADR-019 dimensions, ADR-020 filters, ADR-021 health,
+ADR-022 time ranges, ADR-023 dedup repair, ADR-024 windows, ADR-025 watchdog,
+ADR-026 backfill, ADR-027 default view, ADR-028 routing, ADR-029 ticker,
+ADR-030 flush ordering).
 
 Locked user decisions: (1) bronze idempotency = upsert/MERGE on `(symbol, trade_id)`;
 (2) Great Expectations validates a local PyIceberg scan, not Athena; (3) OpenTofu state in
@@ -50,7 +60,7 @@ S3/Glue/Athena; pytest covers offline via SQL catalog + temp warehouse.
 ```
 Binance WS ──producer──▶ Kafka(trades.raw, key=symbol) ──consumer──▶ S3 Iceberg bronze
                                                                      (upsert, 30–60s micro-batch, commit offsets AFTER write)
-scheduler loop (every ~10 min):  GX check (local PyIceberg scan) ──pass──▶ dbt build (Athena: silver→gold)
+scheduler loop (target 10 min; ~30–35 min at current volume):  GX check (local PyIceberg scan) ──pass──▶ dbt build (Athena: silver→gold)
                                  └──fail──▶ block dbt, write failure report to ops tables
 daily-ish:  ALTER TABLE ... OPTIMIZE / VACUUM (Athena engine v3)
 Superset ──pyathena──▶ Athena (silver, gold, ops health tables)
@@ -72,7 +82,7 @@ src/pipeline/
   producer/    binance_ws.py, kafka_producer.py, run.py        (websockets + backoff)
   consumer/    kafka_consumer.py, batcher.py, bronze_writer.py, metrics.py, run.py
   quality/     gx_runner.py (builds scan window, runs GX checkpoint, persists results)
-  scheduler/   run.py (loop: quality → dbt build → maintenance every N cycles; --once mode)
+  scheduler/   run.py (loop: quality → dbt build → maintenance every 72 cycles; --once mode)
 dbt/           dbt_project.yml, profiles.yml.example, models/{staging,silver,gold}/... + schema.yml
 quality/       gx.yml, suites/*.json (bronze suite)
 infra/         bootstrap/ (S3+DynamoDB state), main.tf, budget.tf, s3.tf, glue.tf, athena.tf, iam.tf, variables.tf, outputs.tf
@@ -115,7 +125,8 @@ runs the module — no functional difference.
   group `bronze-writer`.
 - Batcher: flush on `BATCH_INTERVAL_S` **or** `BATCH_MAX_ROWS`; parse → pyarrow →
   pruned-scan merge on `(symbol, trade_id)` (ADR-013) → **then** `commit(asynchronous=False)`.
-  The batch window starts *after* a flush, not at drain (ADR-014).
+  The batch window starts *after the whole flush* — write, offset commit and
+  ops-metrics append — not at drain (ADR-014/030).
 - On write failure: retry with backoff; never commit → replay safe. Idempotent table
   bootstrap at startup (`create_table_if_not_exists`, partition spec `day(event_time)` +
   `identity(symbol)`, format v2).
@@ -202,7 +213,10 @@ runs the module — no functional difference.
 Spark, Airflow, equities, trading/ML, second exchange, schema registry, multi-broker
 Kafka, MinIO/offline compose — all deferred per Brief/AGENTS.
 
-## 7. Next step
+## 7. Where to go next
 
-Approve this plan (including the §2 layout question). Phase 0 then starts with the repo
-skeleton + `make infra-plan` output shown before any apply.
+The build is complete; future changes start with an ADR (append to
+`docs/decisions.md` and add it to the index) and a failing test. Operations and
+recovery procedures live in the [runbook](docs/runbook.md); cost actuals and the
+small-file plan live in [cost](docs/cost.md). Do not apply infrastructure or
+destroy data without explicit human approval.

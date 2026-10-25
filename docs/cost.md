@@ -43,13 +43,26 @@ The jump from the first fortnight reflects higher live volume plus many small
 Iceberg files accumulated while the scheduler was stopped (host sleep). One
 maintenance pass cut file count and bytes; running it more often (or lifecycle
 rules) keeps request cost down. The kline backfill added 846,720 rows in a single
-table rewrite; the ticker stream adds ~6 msg/s and is negligible.
+table rewrite; the ticker stream adds ~5–7 msg/s and is negligible.
+
+**Measurement.** AWS Cost Explorer, service-level, 16–24 Oct 2026 (9 days),
+excluding the unrelated RDS line in the same account. S3 includes both the lake
+and `athena-results/`. The window included recovery/backfill, so it is not a
+steady-state month.
+
+**Run-rate.** $3.40 / 9 days ≈ $0.38/day ≈ **$11–12/month** at this volume;
+steady state without backfill and with regular compaction should be lower. The
+$20 budget alert leaves headroom. Storage is still cents — the bill is dominated
+by PUT/GET requests from many small objects.
 
 ## Recommendations (not yet applied)
 
 - Lifecycle rule on `s3://<bucket>/athena-results/` (expire after 30 days):
-  dbt tests + SQL Lab leave result files behind — most of the 11k objects.
+  dbt tests + SQL Lab leave result files behind — a large share of the current
+  55.8k objects.
 - Lifecycle bronze prefixes to Intelligent-Tiering after 90 days.
+- Run maintenance on a predictable weekly cadence (not only after incidents) so
+  object counts do not spike; measure Cost Explorer before/after.
 - If dashboards go multi-user: Athena provisioned capacity or result reuse;
   Superset query caching + Postgres metadata.
 

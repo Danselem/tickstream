@@ -1,7 +1,8 @@
 """Athena Iceberg maintenance: OPTIMIZE (compaction) + VACUUM (snapshot cleanup).
 
-Runs every `maintenance_every_n_runs` scheduler cycles (≈12 h) plus on demand via
-`--maintenance`. Failures are logged per statement and never crash the loop.
+Runs every `maintenance_every_n_runs` scheduler cycles (72; roughly every 1.5–2
+days at the current cycle time) plus on demand via `--maintenance`. Failures are
+logged per statement and never crash the loop.
 Note: Athena deletes at most 20,000 objects per VACUUM execution.
 """
 
