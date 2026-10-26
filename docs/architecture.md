@@ -1,132 +1,188 @@
 # Architecture
 
-[Data flow](#data-flow) · [Delivery semantics](#delivery-semantics) ·
-[Failure modes](#failure-modes-seen-in-practice-and-the-fixes)
+**What this answers:** how one Binance message becomes a chart, what prevents
+data loss or duplication, and what happens when a component fails.
+
+**Short version:** Binance pushes trades and quotes to a producer. The producer
+writes them to Kafka, a queue that can replay messages. A consumer groups messages
+into batches and writes them to Iceberg tables on S3. A scheduler checks the new
+data, runs dbt models on Athena, and refreshes the tables Superset reads.
+
+Technical terms are defined in the [glossary](glossary.md).
+
+## The simple view
 
 ```mermaid
 flowchart LR
-    BIN["Binance WS combined stream<br/>7 coins × @trade"] --> PROD[producer<br/>websockets + pydantic<br/>acks=all, idempotent, zstd]
-    PROD --> KAFKA[Kafka KRaft 1 broker<br/>trades.raw, 3 partitions<br/>key=symbol, 7-day retention]
-    KAFKA --> CONS[consumer ×3, one per partition<br/>45 s / 20k-row micro-batches<br/>tenacity retry + best-effort metrics]
-    BIN --> TPROD["ticker-producer<br/>@ticker 1 Hz, own connection"]
-    TPROD --> TKAFKA[ticker.raw, 3 partitions<br/>key=symbol]
-    TKAFKA --> TCONS[ticker-consumer ×1<br/>~500-row batches]
-    TCONS -->|merge on symbol,event_time| S3
-    CONS -->|pruned-scan merge<br/>on symbol,trade_id<br/>offsets after write| S3[(S3 Iceberg bronze<br/>day+symbol partitions<br/>Glue catalog)]
-    SCHED[scheduler loop<br/>~30–35 min cycle] --> GX[Great Expectations<br/>local PyIceberg scan<br/>schema/nulls/range/unique/fresh]
-    GX -->|pass| DBT[dbt on Athena<br/>stg views → silver merges<br/>→ gold candles + microstructure]
-    GX -->|fail| BLOCK[block dbt<br/>report to quality_results]
-    SCHED -.->|every 72 cycles| INT[whole-table integrity<br/>duplicate keys, local scan<br/>→ integrity_results]
-    INT -->|duplicates>0| BLOCK
-    SCHED -.->|every 72 cycles| HLTH[lake health<br/>rows per layer + per-symbol<br/>freshness → layer_counts,<br/>symbol_freshness]
-    BIN -.->|archive 1m klines<br/>SHA256 + monthly/daily zips| BF[bronze_klines<br/>symbol partitions<br/>ADR-026]
-    BF -.-> DBT
-    DBT -->|gold tables| ATH[(Athena)]
-    ATH -->|pyathena| SUP[Superset 6<br/>REST-provisioned<br/>20 charts, published]
-    SCHED -.->|every 72 cycles| MAINT[OPTIMIZE + VACUUM]
-    MAINT -.-> S3
+    B[Binance<br/>trades + 1 Hz quotes] --> P[producer<br/>validate + reconnect]
+    P --> K[(Kafka<br/>replayable queue)]
+    K --> C[consumer<br/>45 s or 20k rows]
+    C --> BR[(bronze<br/>raw Iceberg)]
+    B -. 1-minute archive .-> BK[(bronze_klines)]
+    BR --> Q{quality checks}
+    BK --> D
+    Q -->|pass| D[dbt<br/>silver + gold]
+    Q -->|fail| STOP[skip this cycle]
+    D --> G[(gold<br/>charts)]
+    G --> S[Superset]
+    SCH[scheduler<br/>~30–35 min] --> Q
+    SCH -. every 72 cycles .-> M[compact + clean<br/>integrity + health]
+    M -.-> BR
 ```
 
-## Data flow
+Bronze keeps raw facts (trades, quotes, archive candles). Silver deduplicates and
+types them. Gold answers
+chart questions. The kline archive fills gaps in candle history; it does not
+restore trades or quotes.
 
-1. **Produce.** One asyncio producer holds the Binance combined stream
-   (`<coin>@trade` × 7, lowercase) on the market-data mirror, validates each
-   payload with pydantic (`TradeEvent`: symbol, trade_id, Decimal price/qty,
-   UTC event + ingest time, buyer-maker flag), stamps ingest time, and produces
-   with `acks=all`, idempotence, zstd, keyed by symbol. Reconnects with
-   exponential backoff + jitter; SIGTERM flushes.
-2. **Consume.** Three consumer replicas (`bronze-writer` group, manual commits,
-   earliest) — one per `trades.raw` partition, keyed by symbol so each symbol is
-   owned by exactly one replica. Each batches 45 s / 20k rows, converts to
-   Arrow, merges, appends, then commits offsets. The next batch window starts
-   *after the whole flush* — write, commit and the best-effort metrics append —
-   so a slow step cannot leave the next window expired (ADR-014/030). Lag,
-   batch size and freshness are logged per cycle and appended to
-   `tickstream.pipeline_metrics` after the commit (gap-not-dup).
-3. **Bronze.** Raw trade facts, partitioned by day + symbol, format v2. Merge =
-   scan the batch's day×symbol scope (manifest pruning), Arrow anti-join on
-   `(symbol, trade_id)`, append new rows only; full replays append nothing.
-4. **Quality.** GX checkpoint over `last_success − 5 min overlap` window:
-   required columns, no nulls in keys, `price/qty > 0`, `symbol:trade_id`
-   uniqueness, freshness ≤ 300 s, row count ≥ 1. JSON report to
-   `quality/reports/` + row to `tickstream.quality_results`. Failure → nonzero
-   exit → scheduler skips dbt (and doesn't advance the window). On maintenance
-   cycles (`MAINTENANCE_EVERY_N_RUNS=72`, ~1.5–2 days) the scheduler also runs a
-   **whole-table** integrity check (ADR-016): a local scan of the key columns
-   only, `duplicates = rows − distinct_keys`, recorded in
-   `tickstream.integrity_results`; any duplicate blocks dbt. The same cycle
-   appends **lake health** (ADR-021): per-layer row counts + per-symbol freshness
-   to `layer_counts` / `symbol_freshness`.
-5. **Models.** dbt on Athena engine v3: `stg_trades` view → `silver_trades`
-   (dedup `row_number()`, 2 h lookback, `update_condition` so identical rows
-   skip rewrites) → `gold_candles_1m` (OHLC/volume/USD-notional/VWAP/trade_count/
-   volatility, 30-min recompute) → `gold_market_summary_daily`/`_hourly`
-   (per-symbol open/close/range/notional/%change from a shared macro) →
-   `dim_symbol`/`dim_time` views (ADR-019). Archive klines run in parallel:
-   `stg_klines` → `silver_klines` → `gold_candles_1m_hist` (volatility NULL) and
-   the `gold_candles_1m_unified` view (live candle wins per minute, ADR-026).
-   The ticker chain runs alongside: `stg_tickers` → `silver_tickers` →
-   `gold_market_microstructure_1m` (spread/mid/depth/imbalance, ADR-029).
-   128 dbt nodes (14 models + 114 data tests), all columns documented.
-6. **Serve.** Superset 6 (derived image + `pyathena[pandas]`, SQLite metadata on
-   a volume) provisioned by a REST script: Athena database, 10 datasets
-   (gold, unified gold, microstructure + 2 business summaries + 5 ops/health
-   tables, never bronze), 20 charts across two native tabs — **Market**
-   (candlestick OHLC, price/VWAP, base volume, USD notional, trades/min,
-   volatility, quoted spread, book imbalance, notional-share treemap, 2 KPI
-   tiles, daily & hourly summary tables) and **Pipeline health** (lag, batch
-   rows, quality runs, bronze integrity, rows per layer, per-symbol freshness).
-   Native **Symbol** (defaults to the first configured coin, BTC) and **Time
-   range** filters (ADR-020/027); 24 h detail + 30 d trend windows (ADR-022/027);
-   all charts/labels defined in code (ADR-018). One published dashboard.
-7. **Tickers.** A dedicated producer polls `@ticker` for each symbol at 1 Hz
-   into `ticker.raw`; one consumer merges into `bronze_tickers` on
-   `(symbol, event_time)`, the GX gate validates it, and dbt builds the 1-minute
-   microstructure model (ADR-029).
-8. **Backfill.** `make backfill` downloads Binance's monthly (complete months)
-   and daily (partial month) 1m kline zips, verifies each SHA256 sidecar,
-   normalises microsecond timestamps to naive UTC, and replaces `bronze_klines`
-   in one commit (ADR-026). It is offline, idempotent (`--force`) and gated by
-   dbt tests (uniqueness, OHLC/volume bounds), not the live GX window.
-9. **Maintain.** Every 72 scheduler cycles (and via `make maintenance`): Athena
-   `OPTIMIZE … REWRITE DATA USING BIN_PACK` + `VACUUM` on the Iceberg tables.
-   Because a cycle takes ~30–35 min, this is ~1.5–2 days, not hourly.
+## One trade's journey
+
+Example: a BTCUSDT sell at `12:00:00.123Z`.
+
+1. **Binance sends the trade.** The message contains a trade ID, price, quantity,
+   event time (`12:00:00.123Z`), and whether the buyer was the maker.
+2. **The producer checks it.** Pydantic rejects missing or malformed fields. The
+   producer stamps an **ingest time**, for example `12:00:00.180Z`, then sends the
+   event to `trades.raw` with `BTCUSDT` as the key. The current routing map sends
+   BTC to partition 1; the key keeps all BTC trades on one partition, in order.
+3. **Kafka stores it.** The message is available for replay for seven days. The
+   producer waits for all in-sync replicas (`acks=all`) before considering the send
+   complete.
+4. **A consumer batches it.** The BTC consumer collects until 45 seconds pass or
+   20,000 rows arrive. It refreshes its Iceberg table handle so it sees other
+   replicas' writes, scans only the relevant day and symbol partitions, and checks
+   whether `(BTCUSDT, trade_id)` already exists.
+5. **Bronze gets one row.** If the key is new, the row is appended. If it is a
+   replay, nothing is appended. Only after the Iceberg commit does the consumer
+   save its Kafka offset. If it crashes before that, Kafka replays the batch.
+6. **Quality checks the window.** At the next scheduler cycle, Great Expectations
+   reads from the last successful point minus five minutes. It checks schema,
+   nulls, positive prices and quantities, key uniqueness, row count, and freshness.
+   A failure stops the cycle and does not advance the window.
+7. **dbt builds the models.** `stg_trades` casts the raw fields.
+   `silver_trades` deduplicates with `row_number()` and merges on
+   `(symbol, trade_id)`. `gold_candles_1m` groups trades into the `12:00` minute
+   and computes open, high, low, close, volume, notional, VWAP, trade count, and
+   volatility.
+8. **Superset reads gold.** The dashboard queries Athena for the BTC candle
+   series. Superset never reads bronze directly.
+9. **A late replay changes nothing.** If the same trade arrives again, bronze's
+   key check appends zero rows; silver's merge sees the same key; gold recomputes
+   the same minute if it falls inside the lookback. The final chart value is
+   unchanged.
+
+The two timestamps answer different questions: **event time** says when the market
+moved; **ingest time** says when the pipeline saw it. Charts use event time.
+Freshness uses the newest event time compared with now.
+
+## Components
+
+| Component | What it is | Job | If it fails |
+|---|---|---|---|
+| Binance WebSocket | Public market-data stream | Push trades and 1 Hz quotes | Reconnect with backoff; klines repair candles, not trades |
+| Producer | Python process using `websockets` | Validate, timestamp, key, and send messages | Reconnect; SIGTERM flushes buffered messages |
+| Kafka | One KRaft broker, three partitions per topic | Buffer and replay streams | Single point of failure; a host stop pauses ingestion |
+| Trade consumers | Three replicas in one group | Batch, deduplicate, write bronze, commit offsets | Backlog grows; Kafka replays after restart |
+| Ticker consumer | One replica | Merge 1 Hz quote snapshots | Quote lag grows; history is not recoverable |
+| Bronze | Iceberg tables on S3 + Glue | Store raw facts, partitioned by day and symbol | Writers retry; readers see the last committed snapshot |
+| GX gate | Local Python scan | Check the recent trade and quote windows | dbt is skipped; the window does not advance |
+| Scheduler | Python loop in a container | Run quality → dbt → maintenance | Dashboard freshness stops; data already landed is safe |
+| dbt | SQL models on Athena | Build and test silver/gold | Gold stays at the last good build |
+| Superset | Dashboard on Athena | Read gold and ops tables | Charts stop updating; ingestion is unaffected |
+| Archive backfill | Offline Python loader | Load Binance 1-minute klines | Charts lack history; live data is unaffected |
+| Maintenance | Athena `OPTIMIZE` + `VACUUM` on five core tables | Merge files, remove old snapshots | File count and request cost grow |
+
+## Data contracts
+
+These rules hold across components:
+
+- Every stored timestamp is UTC. Event time and ingest time are separate columns.
+- Trade key: `(symbol, trade_id)`. Quote key: `(symbol, event_time)`.
+- Bronze holds raw facts with no enrichment. The write-time merge absorbs
+  duplicates; it is not a business transformation.
+- Kafka offsets commit only after the Iceberg write succeeds.
+- Scheduled dbt runs only when the quality gate passes. A failed data test stops the build. A manual `make dbt-build` skips GX by design.
+- Gold tables are the serving layer. Superset does not query bronze.
+- Live trade and quote tables are partitioned by event day and symbol, so queries
+  read the smallest useful slice. Archive klines are partitioned by symbol only;
+  ops tables are unpartitioned.
 
 ## Delivery semantics
 
-At-least-once from Kafka; idempotency at every layer: bronze merge keys,
-silver `row_number()` + merge keys, gold candle keys, MERGE
-`update_condition`s. Offsets commit only after the Iceberg write; a crash
-replays into upserts/appends that absorb duplicates (verified: restart,
-SIGKILL, 20k replay batch → 2 appended / 19,998 skipped).
+Kafka is **at-least-once**: a message can be delivered more than once, but should
+not be lost. The pipeline makes that safe:
+
+| Layer | What prevents a duplicate |
+|---|---|
+| Bronze | Scan the batch's partition scope and append only keys that do not exist |
+| Silver | `row_number()` deduplication plus a merge on `(symbol, trade_id)` |
+| Gold | Merge on `(symbol, candle_start)` and recompute the affected window |
+| Ticker | Merge on `(symbol, event_time)` |
+
+Evidence from live runs:
+
+- restart and SIGKILL mid-stream: 0 duplicates;
+- 3 → 2 → 3 consumer rebalance: 0 duplicates;
+- 20,000-row stale replay: 2 appended, 19,998 skipped;
+- whole-table integrity check: duplicate count tracked every maintenance cycle.
+
+There are two documented exceptions. A one-time manual repair may delete duplicate
+rows from `bronze_trades` (ADR-023), because the alternative was a quality gate
+stuck forever. Separately, the offline kline backfill may replace `bronze_klines`
+in one atomic commit (ADR-026). Both are runbook procedures, not normal processing.
 
 ## Failure modes seen in practice (and the fixes)
 
-Full diagnosis and recovery steps are in the [runbook](runbook.md).
+The [runbook](runbook.md) has the check-and-recover steps.
 
 | Symptom | Root cause | Fix |
 |---|---|---|
-| S3 socket timeouts; crash/rebalance livelock | Short pyarrow S3 timeouts on a degraded network | Transient-only tenacity retry; 15/60 s timeouts; `max.poll.interval.ms` 10 min |
-| 440k-message lag, one partition hot | Kafka murmur2 sent 6 of 7 symbols to partition 0 (BTC+ETH ≈ 74%) | Explicit symbol→partition map; no topic change or offset reset (ADR-028) |
-| 15.8k duplicate keys after rebalance | Each replica cached its own Iceberg handle and replayed another replica's batch | `refresh()` before anti-join, cooperative-sticky, commit-on-revoke; integrity backstop (ADR-015/016) |
-| One-row batches forever, lag unbounded | Window reset at flush start (ADR-014), then before a ~40 s metrics append (ADR-030) | Reset at the end of `_flush()`; verified live. Batcher tests cover window semantics, not caller ordering |
-| Stream open but no trades for hours | Pings worked; per-message silence was invisible | 60 s per-message watchdog (ADR-025) |
-| Four-day gap, ~1M backlog | Host sleep stopped Docker and the single broker; volume survived | Drain at ~20k/batch; backfill klines T+1; ticker history is unrecoverable |
-| Glue `UpdateTable` timeouts on MERGE | Rewrote unchanged rows on every lookback | `update_condition` on immutable events (ADR-009) |
-| `table.upsert` O(table) per batch | Full-table merge on every micro-batch | Pruned-scan anti-join merge (ADR-013); benchmark at 10× early |
-| Superset 500s / login or catalog errors | IAM gaps, lowercase `awsdatacatalog`, Superset 6 config/JWT quirks | Add scoped IAM actions; pin `AwsDataCatalog`; config module + CSRF cookie/header (ADR-011/012) |
-| `OPTIMIZE pipeline_metrics` commit error | Four consumers append while maintenance commits | Retry in a quiet window; `VACUUM` still succeeds, data unaffected |
+| S3 socket timeouts; crash/rebalance loop | Short pyarrow timeouts on degraded networking | Retry only transient errors; 15/60 s timeouts; 10-minute poll interval |
+| 440k-message lag, one partition hot | Hash routing sent 6 of 7 symbols to partition 0; BTC+ETH were 74% of trades | Explicit symbol→partition map; no topic change or offset reset (ADR-028) |
+| 15.8k duplicate keys after rebalance | Each replica cached its own Iceberg handle and replayed another replica's batch | Refresh before the scan; cooperative-sticky; commit on revoke; integrity backstop (ADR-015/016) |
+| One-row batches forever | Batch window reset at flush start, then before a slow metrics append | Reset at the very end of the flush (ADR-014/030) |
+| Stream open but no trades for hours | Pings worked; silence was invisible | 60-second per-message watchdog (ADR-025) |
+| Four-day gap, ~1M backlog | Host sleep stopped Docker and the single broker; the volume survived | Drain at ~20k/batch; backfill klines T+1; trades and quotes from the gap are lost |
+| Glue `UpdateTable` timeouts on merge | Identical rows were rewritten on every lookback | `update_condition` skips unchanged rows (ADR-009) |
+| Full-table upsert slowed each batch | Merge work grew with the whole table | Partition-scoped anti-join merge (ADR-013) |
+| Superset 500s or login/catalog errors | IAM gaps, catalog case, Superset 6 config, request-forgery token | Scoped catalog actions; pin `AwsDataCatalog`; config module; cookie plus token header (ADR-011/012) |
+| Maintenance commit error | Consumers append while maintenance commits | Retry in a quiet window; `VACUUM` may still succeed; data is unaffected |
+
+## Limits and trade-offs
+
+| Limit | Why it is accepted | What would change at larger scale |
+|---|---|---|
+| One Kafka broker, RF=1 | The project runs on one machine and must stay cheap | 3+ brokers, RF=3, `min.insync.replicas=2` |
+| ~30–35 minute freshness | Quality plus dbt takes longer than 10 minutes at this volume | More frequent or incremental orchestration |
+| Seven-day Kafka retention | Enough for normal outages; the archive rebuilds candles, not trades or quotes | Tiered storage or a longer retention policy |
+| Top-of-book only | A full order book is out of scope | A depth stream and a different storage design |
+| SQLite Superset metadata | Fine for one local user | Postgres + caching for multi-user serving |
+| No expiration/tiering lifecycle yet | Object count is still manageable; only abort-incomplete-upload is configured | Expire Athena results and tier old bronze data |
+| Archive is T+1 | Binance publishes daily files the next day | Accept the one-day live-only tail |
 
 ## Repository layout
 
 | Path | Contents |
 |---|---|
-| `src/pipeline/producer`, `consumer` | Binance WebSocket producers and Kafka→Iceberg consumers |
-| `src/pipeline/common` | Typed settings/models, Iceberg catalog and ops-table helpers |
-| `src/pipeline/quality`, `scheduler` | GX/integrity/health checks and the quality → dbt → maintenance loop |
-| `src/pipeline/backfill`, `superset` | Archive kline loader and REST dashboard provisioning |
-| `dbt/models/{staging,silver,gold}` | Typed views, incremental silver/gold models, tests and column docs |
-| `quality/suites` | Great Expectations suite snapshots (reports are gitignored) |
-| `infra`, `superset/` | OpenTofu resources and the derived Superset image/config |
-| `tests/unit`, `tests/integration` | Offline pytest suite and the opt-in Kafka roundtrip |
-| `docs`, `plan.md`, `Brief.md` | Reference docs, ADRs, historical plan and original requirements |
+| `src/pipeline/producer` | Binance trade and ticker producers |
+| `src/pipeline/consumer` | Consumer, batcher, bronze writer, ticker consumer, metrics |
+| `src/pipeline/common` | Settings, models, logging, Iceberg helpers, retry |
+| `src/pipeline/quality` | Great Expectations, integrity, lake health |
+| `src/pipeline/scheduler` | Quality → dbt → maintenance loop, dedup repair |
+| `src/pipeline/backfill` | Binance kline archive loader |
+| `src/pipeline/superset` | REST dashboard provisioning |
+| `dbt/models` | Staging views, silver/gold models, tests, column docs |
+| `quality/suites` | Great Expectations suite snapshots |
+| `infra` | OpenTofu resources and state bootstrap |
+| `superset` | Derived image and configuration |
+| `tests/unit`, `tests/integration` | Offline tests and opt-in Kafka roundtrip |
+| `docs` | Data model, testing, ADRs, runbook, cost, glossary |
+
+## Where to go next
+
+- [Data model](data-model.md) — tables, keys, partitions, retention.
+- [Testing](testing.md) — what is proven and what is not.
+- [ADRs](decisions.md) — why each non-obvious choice was made.
+- [Runbook](runbook.md) — setup, checks, incidents, recovery.
+- [Cost](cost.md) — measured spend and cost drivers.
+- [Glossary](glossary.md) — plain definitions of the terms used here.

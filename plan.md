@@ -1,226 +1,242 @@
-# Build Plan — `tickstream` (Binance → Kafka → Iceberg → dbt → Superset)
+# Build plan and as-built record
 
-> **Historical build plan (Oct 2026).** Kept for decision context, not as a
-> runbook. Current behavior is in the [README](README.md),
-> [architecture](docs/architecture.md), and [ADRs](docs/decisions.md).
+**What this answers:** how the pipeline is put together today, what was actually
+built, and where the remaining work is. It is an implementation map, not the
+original wish list.
 
-Status: **Phases 0–4 complete** (Oct 2026), plus post-phase hardening through
-ADR-030. The specification below is the original build plan; the current
-behavior lives in the [README](README.md) and the
-[ADR index](docs/decisions.md).
+**Status:** Phases 0–5 complete, including post-phase hardening through
+Architecture Decision Record 030 (ADR-030). The system runs; the remaining items
+are limits and scale work, not missing core pieces. Terms are in the
+[glossary](docs/glossary.md).
 
-| Phase | State | Evidence |
-|---|---|---|
-| 0 — Skeleton + infra | Complete | `make lint typecheck test`; infra applied; budget alert first |
-| 1 — XRP ingestion | Complete | restart/SIGKILL replay-safe; offsets resume |
-| 2 — Models, quality, schedule | Complete | GX gate blocks dbt; scheduler loop + OPTIMIZE/VACUUM live |
-| 3a — Superset | Complete | REST-provisioned dashboard; SQL Lab returns live Athena rows |
-| 3b — 7-coin expansion | Complete | pruned-scan merge, 3 consumers, rebalance-safe, partition pinning |
-| 4 — Docs | Complete | README + architecture/cost/runbook/ADRs |
-| Post-phase | Complete | integrity (016), tabs (017), filters (020), health (021), backfill (026), ticker (029), batch-window fix (030) |
+## Current state
 
-Current counts: 7 coins, 118 unit tests (integration opt-in), 128 dbt nodes
-(14 models + 114 data tests), 20 Superset charts / 10 datasets, 30 ADRs +
-ADR-012a.
-
-### Brief §11 definition of done
-
-- [x] `make up` starts all local services; OpenTofu provisions AWS.
-- [x] Binance → dashboard with no manual steps (Superset bootstraps and
-  provisions the dashboard).
-- [x] Scheduled GX and dbt runs are green; failures block the build.
-- [x] README has the architecture diagram, setup, design decisions, cost
-  summary and "what I'd change at scale"; Phase 4 lessons learned are included.
-
-Deviations and their rationale are recorded in `docs/decisions.md`
-(ADR-008 ops tables, ADR-009 `update_condition`, ADR-010 IAM addition,
-ADR-012a dashboard linkage, ADR-013 bronze merge, ADR-014 scale-out,
-ADR-015 cross-replica idempotency, ADR-016 integrity, ADR-017 summaries/tabs,
-ADR-018 readability, ADR-019 dimensions, ADR-020 filters, ADR-021 health,
-ADR-022 time ranges, ADR-023 dedup repair, ADR-024 windows, ADR-025 watchdog,
-ADR-026 backfill, ADR-027 default view, ADR-028 routing, ADR-029 ticker,
-ADR-030 flush ordering).
-
-Locked user decisions: (1) bronze idempotency = upsert/MERGE on `(symbol, trade_id)`;
-(2) Great Expectations validates a local PyIceberg scan, not Athena; (3) OpenTofu state in
-S3 + DynamoDB with a one-time bootstrap; (4) local compose always targets real
-S3/Glue/Athena; pytest covers offline via SQL catalog + temp warehouse.
-
-## 0. Verified facts (researched Oct 2026)
-
-| Area | Verified finding |
+| Metric | Current |
 |---|---|
-| Binance WS | Spot market streams: `wss://stream.binance.com:9443` (alt `:443`), raw `/ws/<stream>`, combined `/stream?streams=...`; market-data-only mirror `wss://data-stream.binance.vision` (no auth, recommended for market data). Stream name lowercase: `xrpusdt@trade`. Payload: `e,E,s,t,p,q,T,m,M` (trade_id=`t`, price=`p`, qty=`q`, event time=`T` ms, buyer-is-maker=`m`). Handle server ping/pong and 24 h reconnects. Endpoint kept in config so it's swappable. |
-| Kafka client | `confluent-kafka` 2.15.0 (Jun 2026, librdkafka) — actively maintained; idempotent producer, manual-commit consumer. Chosen over revived `kafka-python`. |
-| Kafka image | Official `apache/kafka` (4.2/4.3) image, KRaft combined single node; RF=1 settings (`OFFSET_TOPIC_REPLICATION_FACTOR=1` etc.). |
-| Iceberg | `pyiceberg` 0.12.0 (Sep 2026) with Glue catalog + `table.upsert(df, join_cols=[...])` — the MERGE primitive for bronze. Known recent issue #3758 ("upsert duplicates rows on partitioned table", Aug 2026) → **mandatory replay-dedup integration test**; fallback documented in §4.3. |
-| dbt | `dbt-athena-community` 1.11.1 (Sep 2026) + dbt-core 1.10/1.12; Iceberg `incremental_strategy='merge'` with `unique_key` on Athena engine v3; `OPTIMIZE`/`VACUUM` are GA on Athena engine v3. Pin `pyathena<=3.35` (documented dbt dependency note). Exact `partitioned_by` syntax for `day()+identity` verified against adapter docs during Phase 2. |
-| Great Expectations | GX Core 1.23.2 (Sep 2026), fluent API (datasource → asset → batch definition → suite → checkpoint). Validates a **local PyIceberg scan** (free, no Athena cost): pandas datasource + `batch_parameters={"dataframe": ...}` fed from `table.scan(window).to_pandas()`. |
-| Superset | Needs `pyathena[pandas]`; connection `awsathena+rest://...` (no Java). Derived image (`FROM apache/superset`) installs the driver. |
-| Sizing (goes in `docs/decisions.md`) | ~200 trades/s avg → ~17M events/day; bronze Parquet ≈ 1–2 GB/day; 60 s micro-batch ≈ 12k rows/commit; 30-day retention ≈ tens of GB (pennies on S3). All Athena queries partition-pruned → cents/day. Measure actuals later. |
+| Symbols | 7 USDT pairs |
+| Source streams | Trades + 1 Hz top-of-book quotes |
+| Trade volume | ~150–200/s (~15M/day) |
+| Tests | 118 offline unit tests; 1 opt-in Kafka integration test |
+| dbt | 128 nodes: 14 models + 114 data tests |
+| Superset | 20 charts / 10 datasets / 2 tabs |
+| Decisions | 30 ADRs + `ADR-012a` addendum |
+| Schedule | ~30–35 minutes per quality → dbt cycle |
+| Maintenance | Every 72 cycles (~1.5–2 days) |
+| Measured cost | $3.40 for 16–24 Oct 2026; ~$11–12/month run-rate |
 
-## 1. Architecture
+## What changed from the original plan
 
-```
-Binance WS ──producer──▶ Kafka(trades.raw, key=symbol) ──consumer──▶ S3 Iceberg bronze
-                                                                     (upsert, 30–60s micro-batch, commit offsets AFTER write)
-scheduler loop (target 10 min; ~30–35 min at current volume):  GX check (local PyIceberg scan) ──pass──▶ dbt build (Athena: silver→gold)
-                                 └──fail──▶ block dbt, write failure report to ops tables
-daily-ish:  ALTER TABLE ... OPTIMIZE / VACUUM (Athena engine v3)
-Superset ──pyathena──▶ Athena (silver, gold, ops health tables)
-```
-
-**Delivery semantics:** at-least-once from Kafka; idempotency via bronze upsert;
-offsets committed only after a successful Iceberg commit; crash → replay → upsert absorbs duplicates.
-
-**"Bronze raw" definition (ADR):** no transformations/enrichment of event content; the
-upsert is a dedup-commit, not a modification of trade facts. Recorded in `docs/decisions.md`.
-
-## 2. Repo layout (files to create)
-
-```
-pyproject.toml, uv.lock, .env.example, Makefile, .dockerignore, Dockerfile
-src/pipeline/
-  common/      config.py (pydantic-settings), logging.py (structlog JSON), models.py
-               (pydantic TradeEvent/BatchReport), iceberg.py (catalog/table bootstrap), aws.py
-  producer/    binance_ws.py, kafka_producer.py, run.py        (websockets + backoff)
-  consumer/    kafka_consumer.py, batcher.py, bronze_writer.py, metrics.py, run.py
-  quality/     gx_runner.py (builds scan window, runs GX checkpoint, persists results)
-  scheduler/   run.py (loop: quality → dbt build → maintenance every 72 cycles; --once mode)
-dbt/           dbt_project.yml, profiles.yml.example, models/{staging,silver,gold}/... + schema.yml
-quality/       gx.yml, suites/*.json (bronze suite)
-infra/         bootstrap/ (S3+DynamoDB state), main.tf, budget.tf, s3.tf, glue.tf, athena.tf, iam.tf, variables.tf, outputs.tf
-superset/      Dockerfile, superset_config.py, bootstrap.sh (db upgrade, admin, athena db)
-docker-compose.yml
-tests/unit/    payload fixtures, model/batcher/config/dedup tests
-tests/integration/  replay-idempotency, produce→consume roundtrip (auto-skip without env)
-docs/          architecture.md (mermaid), decisions.md (ADRs), cost.md, runbook.md
-```
-
-**Open layout question (needs your sign-off):** AGENTS.md shows a top-level `scheduler/`
-directory; this plan puts scheduler code in `src/pipeline/scheduler/` so everything stays
-importable/typed/testable under one `uv` package (`python -m pipeline.scheduler`). Compose
-runs the module — no functional difference.
-
-## 3. Component specs
-
-### 3.1 `common` — configuration & contracts
-- `Settings` (pydantic-settings): `AWS_REGION`, `S3_BUCKET`, `GLUE_DATABASE`,
-  `CATALOG_TYPE` (glue|sql for tests), `KAFKA_BOOTSTRAP`, `TOPIC=trades.raw`,
-  `SYMBOLS=["XRPUSDT"]`, `BINANCE_WS_URL`, `BATCH_INTERVAL_S=45`, `BATCH_MAX_ROWS=20_000`,
-  `FRESHNESS_MAX_LAG_S=300`, `QUALITY_INTERVAL_S=600`, `MAINTENANCE_EVERY_N_RUNS=72`,
-  `LOG_LEVEL`. Committed `.env.example`, real `.env` gitignored.
-- `TradeEvent` pydantic model: `symbol, trade_id, price: Decimal, quantity: Decimal`,
-  `event_time: datetime` (ms→UTC), `ingest_time: datetime` (UTC), `is_buyer_maker: bool` —
-  strict validation; malformed messages are counted + logged, never written.
-- structlog JSON logging everywhere; every consumer cycle logs `lag`, `batch_rows`,
-  `batch_max_event_time`, `commit_ms`.
-- Full type hints on all functions; ruff + mypy enforced via `make`.
-
-### 3.2 Producer (`websockets`, asyncio)
-- Connect to `wss://.../stream?streams=xrpusdt@trade` (combined stream, ready for
-  multi-coin), pydantic parse, stamp `ingest_time`, produce with `acks=all`,
-  `enable.idempotence=true`, `compression=zstd`, key=`symbol`.
-- Reconnect with exponential backoff + jitter; lib handles ping/pong;
-  SIGTERM → flush → close.
-
-### 3.3 Consumer
-- `confluent-kafka` Consumer: `enable.auto.commit=false`, `auto.offset.reset=earliest`,
-  group `bronze-writer`.
-- Batcher: flush on `BATCH_INTERVAL_S` **or** `BATCH_MAX_ROWS`; parse → pyarrow →
-  pruned-scan merge on `(symbol, trade_id)` (ADR-013) → **then** `commit(asynchronous=False)`.
-  The batch window starts *after the whole flush* — write, offset commit and
-  ops-metrics append — not at drain (ADR-014/030).
-- On write failure: retry with backoff; never commit → replay safe. Idempotent table
-  bootstrap at startup (`create_table_if_not_exists`, partition spec `day(event_time)` +
-  `identity(symbol)`, format v2).
-- Lag tracking (high-watermark − position) + freshness logged each cycle and appended to
-  `ops.pipeline_metrics`.
-- **Guardrail:** integration test replays the same batch twice and asserts row count
-  unchanged (covers PyIceberg issue #3758). If it fires: fallback =
-  `table.overwrite(batch, predicate=...)`, or pin `pyiceberg==0.11.1`.
-
-### 3.4 Quality (GX 1.23, local scan)
-- Suite on bronze window (`event_time >= last_successful_run − 5 min` overlap):
-  required columns/no nulls in key fields, `price > 0`, `quantity > 0`, `trade_id`
-  uniqueness within window, freshness `max(event_time)` ≤ threshold.
-- Runner writes pass/fail + metric summary (JSON artifact in `quality/reports/`,
-  gitignored) **and** appends a row to `ops.quality_results` for the Superset health panel.
-- Failure → exit nonzero → scheduler skips dbt this cycle (Brief §6).
-
-### 3.5 Scheduler (replaces Airflow)
-- Single loop: every `QUALITY_INTERVAL_S`: GX → (pass?) → `dbt build` → log; every
-  `MAINTENANCE_EVERY_N_RUNS`: `OPTIMIZE <table> REWRITE DATA` + `VACUUM <table>` on
-  bronze/silver/gold (Athena via pyathena; needs `s3:DeleteObject` for VACUUM).
-- `--once` mode backs `make quality` and `make dbt-build`.
-
-### 3.6 dbt (Athena engine v3, Iceberg)
-- **staging:** thin views over bronze (cast, UTC, no logic).
-- **silver `silver_trades`:** `incremental`, `merge`, `unique_key=["symbol","trade_id"]`,
-  dedup via `row_number()`, `is_incremental()` refresh window = last 2 h of `event_time`
-  (late-arrival grace, idempotent re-merge), partitioned day+symbol.
-- **gold `gold_candles_1m`:** 1-min OHLC, `volume`, `vwap` (Σp·q/Σq), `trade_count`,
-  `volatility` (stddev of per-trade log returns within minute), `merge` on
-  `(symbol, candle_start)`, trailing 30-min recompute window.
-- Tests: `unique`+`not_null` on keys, `accepted_values`, `dbt_utils.expression_is_true`
-  (price/qty>0), source freshness; all columns documented; Superset exposure declared.
-- Runs only after GX passes (enforced by scheduler; documented for manual runs).
-
-### 3.7 Infra (OpenTofu)
-- `make infra-bootstrap`: one-time state bucket + DynamoDB lock table; then S3 backend in `infra/`.
-- **Creation order: budget alert (email var) first**, then: S3 bucket (SSE-S3,
-  public-access block, abort-incomplete-MPU lifecycle), Glue DB, Athena workgroup
-  (engine v3, results prefix), IAM user + policy scoped to bucket ARN/prefix, Glue DB,
-  workgroup only.
-- `make infra-plan` output reviewed before any apply. **No `make infra-apply` or
-  `tofu destroy` without explicit human approval.** `tofu destroy` documented in runbook only.
-
-### 3.8 Superset
-- Single `apache/superset` derived image (driver install + `superset_config.py`); SQLite
-  metadata; init: `db upgrade` + create admin from env; datasets point at gold/ops tables
-  (never raw bronze for dashboards).
-- Dashboard: Market tab (price/VWAP, base volume, USD notional, trades/min, volatility,
-  candlestick, notional-share treemap, KPI tiles, daily/hourly summary tables) + Pipeline
-  health tab (lag, batch rows, last GX result, bronze integrity, rows per layer, per-symbol
-  freshness) from gold + the ops/health tables in `tickstream`.
-
-### 3.9 Compose & Make
-- Services: `kafka` (official image, KRaft RF=1), `producer`, `consumer`, `scheduler`,
-  `superset`. One multi-stage uv Dockerfile for the three Python services; healthcheck on
-  Kafka; `.dockerignore`.
-- Makefile targets exactly per AGENTS: `install up down lint format typecheck test quality
-  dbt-build infra-bootstrap infra-plan infra-apply` (+ `logs`, `restart` convenience).
-
-## 4. Phases (finish + verify one before the next; small commits with tests)
-
-| Phase | Deliverables | Done when |
+| Original assumption | As built | Why |
 |---|---|---|
-| **0 – Skeleton + infra** | uv project, ruff/mypy/pytest wired, Makefile, `.env.example`, `common` (Settings/logging/models), OpenTofu (bootstrap → budget alert → resources), docs stubs | `make lint typecheck test` green; `make infra-plan` reviewed → apply approved; budget alert confirmed in console |
-| **1 – XRP ingestion** | Kafka service, producer, consumer, bronze table, unit + replay-idempotency tests | XRP trades land in bronze via `make up`; restart mid-stream creates no duplicates; offsets resume; lag/freshness logged |
-| **2 – Models + quality + schedule** | dbt staging/silver/gold + tests/docs, GX suite, scheduler loop, OPTIMIZE/VACUUM cadence, ops tables | `make quality` → `make dbt-build` green; simulated GX failure blocks dbt; second loop run merges without dupes |
-| **3 – Dashboard + expansion** | Superset service + dashboard, then 6–7 coins via `SYMBOLS` config (combined stream, key=symbol) | Dashboard renders from Athena; multi-coin data correct per symbol — **done**: 5 charts published, 7 coins ingested |
-| **4 – Docs** | README (diagram, setup, decisions, cost, "what I'd change at scale"), `docs/*` | Brief §11 definition-of-done fully checked |
+| XRP only first | 7 coins after the single-coin path worked | The pipeline was stable enough to expand; routing was fixed in ADR-028 |
+| Quality/dbt every ~10 minutes | ~30–35 minutes | A dbt build plus GX scan takes longer than 10 minutes at this volume |
+| 5 initial charts | 20 charts across 2 tabs | The dashboard gained business and pipeline-health views |
+| `table.upsert` for bronze | Partition-scoped key check, then append | The full-table update-or-insert did work proportional to the whole table and stalled at scale (ADR-013) |
+| Trades only | Added a separate ticker stream | Trades cannot show quoted spread, depth, or imbalance (ADR-029) |
+| README as the main reference | README hub + dedicated docs | Each topic needs enough depth to be useful on its own |
 
-## 5. Risks to watch (each with a verification step)
+## Current architecture
 
-1. PyIceberg partitioned-upsert regression → replay test in Phase 1; fallback =
-   overwrite-predicate or pin 0.11.1.
-2. dbt-athena `partitioned_by` day+identity syntax / pyathena pin → verified when models
-   first compile (Phase 2).
-3. Binance endpoint reachability from your region → endpoint is config;
-   `data-stream.binance.vision` mirror ready.
-4. Single-broker KRaft = SPOF (accepted, documented as intentional MVP tradeoff in
-   `docs/decisions.md`).
+```text
+Binance WebSocket
+  → producer (validate, reconnect, key by symbol)
+  → Kafka trades.raw / ticker.raw
+  → consumer (45 s or 20k rows)
+  → bronze Iceberg on S3 + Glue
+  → GX + integrity + health checks
+  → dbt on Athena (staging → silver → gold)
+  → Superset
+```
 
-## 6. Explicitly out of scope
+One sentence per trust boundary:
 
-Spark, Airflow, equities, trading/ML, second exchange, schema registry, multi-broker
-Kafka, MinIO/offline compose — all deferred per Brief/AGENTS.
+- **Producer:** turns a WebSocket message into a validated event; never writes
+  half a trade.
+- **Kafka:** holds the stream for seven days and lets a consumer replay it.
+- **Consumer:** writes a batch to Iceberg first, commits its Kafka offset second.
+- **Quality gate:** reads the new window locally; failure stops dbt.
+- **dbt:** builds typed tables and tests; a failed test stops the build.
+- **Superset:** reads gold and ops tables, never raw bronze.
 
-## 7. Where to go next
+More detail: [architecture](docs/architecture.md) and
+[one trade's journey](docs/architecture.md#one-trades-journey).
 
-The build is complete; future changes start with an ADR (append to
-`docs/decisions.md` and add it to the index) and a failing test. Operations and
-recovery procedures live in the [runbook](docs/runbook.md); cost actuals and the
-small-file plan live in [cost](docs/cost.md). Do not apply infrastructure or
-destroy data without explicit human approval.
+## Repository layout
+
+| Path | Contents |
+|---|---|
+| `src/pipeline/producer` | Binance WebSocket trade and ticker producers |
+| `src/pipeline/consumer` | Kafka consumer, batcher, bronze writer, ticker consumer, metrics |
+| `src/pipeline/common` | Settings, models, logging, Iceberg catalog, retry helpers |
+| `src/pipeline/quality` | GX runner, whole-table integrity, lake health |
+| `src/pipeline/scheduler` | Quality → dbt → maintenance loop, dedup repair |
+| `src/pipeline/backfill` | Binance 1-minute kline archive loader |
+| `src/pipeline/superset` | REST dashboard provisioning |
+| `dbt/models` | Staging views, silver/gold models, tests, column docs |
+| `quality/suites` | Great Expectations suite snapshots |
+| `infra` | OpenTofu: S3, Glue, Athena, IAM, budget, state backend |
+| `superset` | Derived Superset image and config |
+| `tests/unit`, `tests/integration` | Offline tests and the opt-in Kafka roundtrip |
+| `docs` | Architecture, data model, testing, ADRs, runbook, cost, glossary |
+
+## Component records
+
+### Configuration and contracts
+
+- `pydantic-settings` reads environment variables from `.env`; `.env.example` is
+  committed and real values are not.
+- `TradeEvent` validates symbol, trade ID, decimal price/quantity, UTC event time,
+  UTC ingest time, and buyer-maker flag.
+- Structured JSON logs include batch size, lag, maximum event time, and commit
+  duration.
+- The catalog is configurable: `glue` for real runs, `sql` for offline tests.
+
+Key settings: `TICKSTREAM_SYMBOLS`, `TICKSTREAM_SYMBOL_PARTITIONS`,
+`TICKSTREAM_BATCH_INTERVAL_S=45`, `TICKSTREAM_BATCH_MAX_ROWS=20000`,
+`TICKSTREAM_FRESHNESS_MAX_LAG_S=300`, `TICKSTREAM_MAINTENANCE_EVERY_N_RUNS=72`.
+
+### Producers
+
+- One asyncio producer holds Binance's combined trade stream; a second holds the
+  ticker stream.
+- Messages are validated with pydantic, stamped with ingest time, and sent with
+  `acks=all` (wait for the broker's acknowledgement), producer idempotence (a
+  retried send is not stored twice), compressed messages, and `key=symbol`.
+- Reconnect uses exponential backoff with jitter. A 60-second no-message watchdog
+  treats a silent-but-open socket as dead (ADR-025).
+- SIGTERM flushes and closes cleanly.
+
+### Consumers
+
+- Three trade consumers share the `bronze-writer` group, one per partition.
+  Symbols are pinned to partitions so each symbol has one writer (ADR-028).
+- One ticker consumer writes the lower-volume quote stream.
+- Manual commits, `auto.offset.reset=earliest` (replay from the oldest message if
+  there is no saved position), cooperative-sticky assignment (rebalances move only
+  the partitions that need to move), and commit-on-revoke.
+- A batch flushes at 45 seconds or 20,000 rows. The next window starts only after
+  write + commit + best-effort metrics, so a slow step cannot create one-row
+  batches (ADR-014/030).
+- Before the dedup scan, the consumer refreshes its Iceberg table handle so it
+  sees writes from other replicas (ADR-015).
+- Bronze merge: scan only the batch's day/symbol partitions, check which
+  `(symbol, trade_id)` keys already exist, and append only new rows. A full replay
+  appends zero rows (ADR-013).
+
+### Quality and scheduler
+
+- Great Expectations (GX) validates the last successful window minus five minutes: required columns,
+  key nulls, positive price/quantity, unique trade keys, at least one row, and
+  freshness ≤ 300 seconds.
+- A failed suite writes evidence and blocks dbt; the quality window does not
+  advance.
+- Every 72 cycles: whole-table duplicate check over bronze keys, per-layer row
+  counts, per-symbol freshness, and `OPTIMIZE` + `VACUUM` on the five core tables.
+- The scheduler has `--once` style targets for manual quality, integrity, health,
+  dbt, and maintenance runs.
+
+### dbt models
+
+- **Staging:** thin views that cast and normalise bronze.
+- **Silver:** `silver_trades` and `silver_tickers` are incremental merges with a
+  two-hour lookback; `silver_klines` is a view over the archive.
+- **Gold:** `gold_candles_1m` has OHLC, volume, USD notional, VWAP, trade count,
+  and volatility. Daily/hourly summaries share one macro. Microstructure comes
+  from ticker data. The unified candle view prefers live candles over archive
+  candles.
+- Incremental windows anchor on the target table, not the source, so a skipped
+  run catches up on the next success (ADR-024).
+- `update_condition` skips unchanged rows, avoiding Glue timeouts (ADR-009).
+- Every model has data tests, and the core columns are documented.
+
+### Infrastructure and serving
+
+- OpenTofu state is in S3 with a DynamoDB lock; bootstrap is a one-time command.
+- In the main stack, the $20 budget alert is declared before S3, Glue, the Athena
+  workgroup, and a scoped IAM user. The state bucket and lock table are created
+  earlier by the one-time bootstrap. Declaration order does not guarantee
+  OpenTofu's parallel execution order.
+- No costly resources: no Redshift, no large instances.
+- Superset uses a derived image with `pyathena[pandas]`, SQLite metadata on a
+  volume, and a REST provisioning script. Datasets point at gold and ops tables.
+- The dashboard is reproducible: create/update database → datasets → charts →
+  dashboard, with stable IDs and labels.
+
+## Current versions
+
+| Component | Version |
+|---|---|
+| Python | 3.12 |
+| Apache Kafka | 4.2.0 |
+| Apache Superset | 6.0.0 |
+| PyIceberg | 0.12.0 |
+| `confluent-kafka` | 2.15.1 |
+| dbt-core | 1.12.5 |
+| `dbt-athena-community` | 1.11.1 |
+| Great Expectations | 1.23.2 |
+| PyArrow | 25.0.1 |
+| PyAthena | 3.34.0 |
+
+## Phases and evidence
+
+| Phase | What was delivered | Evidence |
+|---|---|---|
+| 0 — Skeleton + infra | uv project, lint/types/tests, Makefile, settings, remote state, budget, S3, Glue, Athena, IAM | `make lint typecheck test`; plan reviewed before apply |
+| 1 — XRP ingestion | Producer, Kafka, consumer, bronze, replay tests | Restart/SIGKILL: no duplicates; offsets resumed |
+| 2 — Models + quality | dbt silver/gold, GX, scheduler, maintenance | GX failure blocked dbt; OPTIMIZE/VACUUM ran |
+| 3 — Dashboard + expansion | Superset, 7 symbols, parallel consumers | 20 charts / 10 datasets; 7 symbols ingested |
+| 4 — Docs + hardening | ADRs, runbook, cost, ticker, backfill, integrity | 30 ADRs; 846,720 archive rows; 118 tests |
+| 5 — CI | Lint, types, offline tests on push/PR | GitHub Actions run 40213500712 green |
+
+## Decisions map
+
+All non-obvious choices are recorded in the [ADR index](docs/decisions.md).
+Start with:
+
+- **Reliability:** ADR-001, 013, 014, 015, 016, 024, 030.
+- **Scale and routing:** ADR-004, 006, 028, 029.
+- **Quality and data shape:** ADR-002, 008, 009, 017, 019, 021.
+- **Serving:** ADR-011, 012, 012a, 018, 020, 022, 027.
+- **Recovery:** ADR-023, 025, 026.
+
+The index shows each decision's status; superseded decisions are kept rather than
+rewritten.
+
+## Risks and limits
+
+| Risk | Current mitigation | Remaining exposure |
+|---|---|---|
+| Single broker / host sleep | Kafka volume and offsets survive a restart | Full outage until the host returns; trade and ticker history from the gap is lost |
+| Gold is ~30–35 minutes stale | Freshness is measured and charted | Not suitable for live trading |
+| Small files raise S3 request cost | Batched writes, OPTIMIZE, VACUUM | No expiration/tiering lifecycle yet; only abort-incomplete-upload exists |
+| A duplicate outside the GX window | Whole-table integrity every 72 cycles | Detection can take up to one maintenance interval |
+| PyIceberg partitioned upsert bug | Anti-join merge avoids it; replay test | A future PyIceberg upgrade needs the same test |
+| CI cannot prove the live path | Manual live checks documented in the runbook | dbt/GX/Kafka integration is not continuous |
+| Kafka replay is limited | Seven-day retention | Trades and quotes outside retention are lost; archive backfill restores candles only |
+
+## Next work
+
+1. Apply S3 lifecycle rules for `athena-results/` and old snapshots; measure the
+   request-cost change.
+2. Keep maintenance on a predictable cadence (currently every 72 cycles); consider
+   a fixed weekly window if changing it.
+3. Add freshness and lag alerts if this moves beyond a portfolio setup.
+4. At larger scale: 3 Kafka brokers (three copies of each partition), managed
+   compaction, Postgres for Superset metadata, and IAM roles instead of a user key.
+5. Keep documentation, counts, cadence, and ADR index in sync with any change.
+
+## How to work on this repo
+
+```bash
+make install
+make lint typecheck test
+make up
+make quality
+make dbt-build
+make down
+```
+
+The Makefile is the entry point. Read the [runbook](docs/runbook.md) before
+running infrastructure commands; `make infra-apply` and `tofu destroy` require
+explicit human approval. Do not reset Kafka offsets or delete data to fix an
+incident without checking the runbook first.

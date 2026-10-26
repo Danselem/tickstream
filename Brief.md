@@ -1,94 +1,210 @@
-# Real-Time Crypto Streaming Pipeline: Project Brief
+# tickstream — Project Brief
+
+**What this is:** a working data pipeline that turns live Binance trades and
+1-second price quotes into checked, minute-level tables and a dashboard. It runs
+locally in Docker, stores data in AWS, and is built so a crash or replay does not
+create duplicate records.
+
+**What this is not:** a trading system, a price predictor, or a production
+multi-tenant service. It is a portfolio project that shows the engineering
+decisions behind a small lakehouse.
 
 ## 1. Goal
 
-Build an end-to-end streaming data pipeline that ingests live Binance trade data, lands it in an Apache Iceberg lake on AWS S3, models it with dbt, validates it with Great Expectations, and serves dashboards in Apache Superset. The aim is a small project that works end to end and that I can explain decision by decision.
+Build one end-to-end path — source → queue → storage → checks → models →
+dashboard — and be able to explain every non-obvious choice with evidence.
 
-## 2. Scope
+Success means a reader can answer three questions:
 
-- **Start with one coin: XRP (XRPUSDT).** Expand to six or seven popular coins (for example BTC, ETH, SOL, ADA, DOGE, plus LINK or AVAX) only after the single-coin pipeline is solid.
-- **Streaming ingestion, micro-batch analytics.** Events flow continuously into Kafka and Iceberg; dbt and quality checks run on a schedule (every \~10 minutes).
-- **Out of scope:** Spark, Airflow, equities, trading logic, ML. Airflow and a second exchange are optional later extras.
+1. What happens to one trade from Binance to a chart?
+2. What prevents losses and duplicates when something crashes?
+3. What does it cost, what can fail, and what would change at larger scale?
+
+## 2. Current scope
+
+| Item | Current state |
+|---|---|
+| Source | Binance Spot public market data (no account or API key) |
+| Symbols | 7 USDT pairs: `BTCUSDT`, `ETHUSDT`, `SOLUSDT`, `ADAUSDT`, `DOGEUSDT`, `LINKUSDT`, `AVAXUSDT` |
+| Streams | Trades (`@trade`) and 1 Hz top-of-book quotes (`@ticker`) |
+| Volume | ~150–200 trades/s (~15M/day), plus ~5–7 quote messages/s |
+| Cadence | Quality → dbt → dashboard every ~30–35 minutes; maintenance every 72 cycles |
+| Freshness | Gold tables ≤ ~35 minutes; ticker data ≤ ~1 minute |
+| Storage | Apache Iceberg tables on Amazon S3, registered in AWS Glue |
+| Serving | Apache Superset: 20 charts, 10 datasets, two tabs |
+| Monthly cost | ~$11–12 at current volume; $20 budget alert |
+
+The project started with XRP only. It now runs the seven pairs above; XRP remains
+queryable in old data but is no longer configured.
+
+**Out of scope by design:** Spark, Airflow, equities, trading logic, machine
+learning, a second exchange, a full order book, and multi-tenant security.
 
 ## 3. Architecture
 
-Binance WebSocket -> Python producer -> Kafka -> Python consumer (PyIceberg) -> S3 bronze Iceberg table (Glue catalog) -> Great Expectations checks -> dbt on Athena (silver, gold) -> Superset
+```text
+Binance WebSocket
+  → Python producer
+  → Kafka
+  → Python consumer (PyIceberg)
+  → bronze Iceberg on S3 + Glue
+  → Great Expectations checks
+  → dbt on Athena (silver, gold)
+  → Superset
+```
 
-Everything except S3, Glue, and Athena runs locally in Docker Compose. AWS resources are created with OpenTofu.
+Everything except S3, Glue, Athena, and the budget alert runs locally in Docker
+Compose. AWS resources are created with OpenTofu.
+
+Two ideas make the flow safe:
+
+- **Kafka may deliver a message twice.** The consumers therefore write with
+  idempotent keys: the same `(symbol, trade_id)` is stored once.
+- **A row is only marked as done after it is stored.** Consumer offsets are
+  committed after the Iceberg write, so a crash replays work instead of losing it.
 
 ## 4. Stack
 
-| Layer | Tool | Notes |
-| --- | --- | --- |
-| Source | Binance WebSocket (trade stream) | Public market data, no paid plan; confirm the endpoint in current Binance docs |
-| Ingestion | Python producer | Reconnect logic, one message per trade |
-| Broker | Apache Kafka (KRaft, single broker) | Topic per stream, keyed by symbol |
-| Landing | Python Kafka consumer using PyIceberg | Micro-batches events and appends them to an Iceberg table |
-| Lake | AWS S3 with Apache Iceberg tables | Parquet data files, partitioned by date and symbol |
-| Catalog | AWS Glue Data Catalog | Registers the Iceberg tables so Athena can query them |
-| Warehouse | AWS Athena (default) | Redshift Serverless is the alternative if the cost is acceptable |
-| Transformations | dbt (dbt-athena adapter) | Incremental models on Iceberg tables |
-| Data quality | Great Expectations | Runs before each dbt build |
-| Scheduling | Small container looping GE then dbt build | Replaces Airflow for the MVP |
-| Infrastructure as code | OpenTofu | Creates the S3 bucket, Glue database, Athena workgroup, IAM, and budget alert; one command to tear down |
-| Visualisation | Apache Superset | Connects to Athena |
+| Layer | Tool | What it does here |
+|---|---|---|
+| Source | Binance WebSocket | Pushes trades and quotes in real time |
+| Ingestion | Python 3.12 producer | Validates messages, reconnects, writes to Kafka |
+| Queue | Apache Kafka 4.2 (KRaft, one broker) | Buffers streams and allows replay |
+| Landing | Python consumer + PyIceberg | Groups events into batches and writes bronze Iceberg |
+| Lake | Amazon S3 + Apache Iceberg | Stores open-format data files and table metadata |
+| Catalog | AWS Glue Data Catalog | Tells Athena where tables and schemas live |
+| Warehouse | Amazon Athena | Runs SQL models and dashboard queries |
+| Transformation | dbt-core + dbt-athena | Builds typed, tested silver and gold models |
+| Quality | Great Expectations | Blocks dbt when the recent bronze data is bad |
+| Scheduling | Python loop in a container | Runs quality, dbt, integrity, health, and maintenance |
+| Infrastructure | OpenTofu | Creates S3, Glue, Athena, IAM, and the budget alert |
+| Serving | Apache Superset 6.0 | Hosts the Market and Pipeline health dashboards |
 
-**On Iceberg:** Iceberg is a table format that sits on top of S3, not an alternative to it. It adds ACID commits, schema evolution, time travel, and safe row-level updates (MERGE), which makes deduplication and corrections much cleaner than raw Parquet files.
+No queue, table format, or BI tool is added without updating the
+[ADRs](docs/decisions.md). Terms such as *Iceberg*, *offset*, and *VWAP* are
+defined in the [glossary](docs/glossary.md).
 
-## 5. Data model (medallion)
+## 5. Data model
 
-- **Bronze:** raw trade events as received (symbol, price, quantity, trade ID, event time, ingest time), stored as an Iceberg table.
-- **Silver:** deduplicated on trade ID, typed, and timestamped in UTC.
-- **Gold:** 1-minute OHLC candles, VWAP, trade counts, and rolling volatility per symbol.
+Three refinement levels, explained in full in the [data model](docs/data-model.md):
 
-## 6. Data quality (Great Expectations)
+| Layer | Plain meaning | Examples |
+|---|---|---|
+| **Bronze** | Raw facts, no business enrichment. Replays are absorbed by keys. | `bronze_trades`, `bronze_tickers`, `bronze_klines` |
+| **Silver** | Typed, deduplicated, UTC-normalised rows. | `silver_trades`, `silver_tickers`, `silver_klines` |
+| **Gold** | Minute-level answers for charts. | `gold_candles_1m`, summaries, microstructure |
 
-Checks run on each new batch before dbt builds:
+The main key is `(symbol, trade_id)` for trades and `(symbol, event_time)` for
+quotes. Both event time and ingest time are kept, so pipeline delay can be
+separated from market timing.
 
-- Schema and required columns present, no nulls in key fields
-- Price and quantity greater than zero
-- Trade ID uniqueness after dedup
-- Freshness: latest event no older than a set threshold
+The unified candle view prefers live candles and lets the archive fill gaps. The
+default backfill starts at the first day of the month 60 days ago; the measured
+load covered 84 days (846,720 rows), and the dashboard uses at least 30 days.
 
-Failed checks stop the dbt run and are written to a visible report.
+## 6. Data quality
 
-## 7. Dashboards (Superset)
+Before each scheduled dbt build, Great Expectations checks the recent bronze window (with
+a five-minute overlap):
 
-- Live-ish price and candle chart per symbol
-- Volume and VWAP over time
-- Volatility panel
-- Pipeline health panel (data freshness, row counts, failed checks)
+- required columns exist and key fields are not null;
+- price and quantity are positive;
+- trade keys are unique within the window;
+- at least one row arrived;
+- the newest event is no older than 300 seconds.
 
-## 8. Phases
+A failure stops the cycle: dbt does not run and the quality window does not
+advance. Results are summarized in `tickstream.quality_results`; manual runs also
+write files under `quality/reports/`.
 
-1. **Phase 0, infrastructure:** OpenTofu creates the S3 bucket, Glue database, Athena workgroup, least-privilege IAM user, and an AWS budget alert before anything else.
-2. **Phase 1, XRP only:** WebSocket into Kafka, consumer appending to the bronze Iceberg table, verify data lands correctly and survives a restart.
-3. **Phase 2:** dbt silver and gold models on Athena, Great Expectations checks, scheduled run, Iceberg maintenance (see section 9).
-4. **Phase 3:** Superset dashboard, then expand to six or seven coins.
-5. **Phase 4:** README polish, architecture diagram, cost breakdown, and lessons learned.
-6. **Optional extras:** Airflow, a second exchange.
+Two slower checks run every 72 cycles:
 
-## 9. Engineering concerns to demonstrate
+- **Whole-table integrity:** count duplicate trade keys across all bronze rows.
+- **Lake health:** row counts per layer and freshness per symbol.
 
-- Duplicate handling and idempotent writes (safe replays), using MERGE on Iceberg
-- **Small files:** frequent micro-batch commits create many small files; schedule compaction (Athena OPTIMIZE) and snapshot cleanup (VACUUM)
-- Late or out-of-order events
-- Reconnect and backoff on WebSocket drops
-- Replay from Kafka offsets
-- Schema evolution using Iceberg
-- Monitoring of consumer lag and data freshness
+The difference matters: the frequent check is cheap but only sees a recent
+window; the slower check can catch an old duplicate the window missed.
 
-## 10. Cost guardrails
+## 7. Dashboard
 
-- Budget alert is created by OpenTofu before any other resource
-- Dedicated IAM user with least-privilege access
-- Partition by date and symbol and query only needed partitions in Athena
-- Commit in micro-batches (for example every 30 to 60 seconds), not per event, to limit small files and request costs
-- Tear down with a single OpenTofu destroy when not in use
+One published Superset dashboard, `tickstream`, with two tabs:
+
+| Tab | Answers | Examples |
+|---|---|---|
+| **Market** | What is the market doing? | Candlestick, price/VWAP, volume, USD notional, trades/min, volatility, spread, book imbalance, summaries |
+| **Pipeline health** | Is the pipeline healthy? | Lag, batch rows, quality runs, bronze integrity, rows per layer, freshness per symbol |
+
+Ten datasets: gold and ops/health tables only, never raw bronze. The Symbol
+filter defaults to BTC; the Time range filter applies to the dashboard.
+
+## 8. Build phases
+
+| Phase | Outcome | Evidence |
+|---|---|---|
+| 0 — Skeleton and AWS | Repo, tests, Makefile, remote state, budget alert, S3, Glue, Athena, IAM | `make lint typecheck test`; plan reviewed before apply |
+| 1 — XRP ingestion | Live trades into Kafka and bronze; restart-safe | Restart and SIGKILL produced no duplicates; offsets resumed |
+| 2 — Models and quality | Silver/gold, GX gate, scheduler, maintenance | GX failure blocked dbt; OPTIMIZE/VACUUM ran on schedule |
+| 3 — Dashboard and 7 coins | Superset dashboard, multi-symbol ingestion | Dashboard reads live Athena; 7 symbols ingest |
+| 4 — Docs and hardening | README, ADRs, runbook, cost, ticker stream, backfill | 30 ADRs + addendum; 118 tests; 128 dbt nodes |
+| 5 — CI | Lint, types, offline tests on `main` pushes and pull requests | GitHub Actions run 40213500712 green |
+
+The original build plan is now an [as-built plan](plan.md), not a to-do list.
+
+## 9. Guarantees and evidence
+
+| Guarantee | How it is enforced | Evidence |
+|---|---|---|
+| A replay does not duplicate trades | Bronze checks `(symbol, trade_id)` before append | 20k replay: 2 appended, 19,998 skipped |
+| A rebalance does not duplicate trades | Refresh the Iceberg table before the scan; commit on revoke | 3→2→3 replica rebalance: 0 duplicates |
+| Bad recent data does not reach gold | GX gate blocks dbt | Injected GX failure returned exit 1 and skipped dbt |
+| Old duplicates are still caught | Whole-table integrity check every 72 cycles | Duplicate count exposed in `integrity_results` |
+| A skipped run heals | dbt windows anchor on the target table | Late trades recompute the affected minute |
+| The dashboard is reproducible | Superset provisioned through its REST API | `make superset` converges; 20 charts / 10 datasets |
+
+These are tested claims, not adjectives. Known gaps are listed in the
+[README](README.md#known-gaps) and [testing](docs/testing.md#known-gaps).
+
+## 10. Cost and guardrails
+
+Measured spend was **$3.40 for 16–24 October 2026**; the rough steady-state
+projection is **$11–12/month** at current volume. S3 requests from many small files dominate; storage is cents.
+Athena is $0.12 in the same window, spent on dbt builds and maintenance; GX and
+integrity checks scan locally and add no Athena cost.
+
+Controls:
+
+- the $20 budget alert is declared first in the main pipeline stack (the tiny state
+  bucket and lock table are created during bootstrap; OpenTofu may create
+  independent resources concurrently);
+- the pipeline IAM user has a scoped, least-privilege policy;
+- live tables are partitioned by day and symbol, so queries scan less;
+- writes are batched (45 seconds or 20,000 rows) to limit requests;
+- `OPTIMIZE` and `VACUUM` run on a schedule;
+- teardown is `tofu destroy` with human approval, after emptying the lake bucket;
+  local volumes are removed separately.
+
+Details and recommendations: [cost](docs/cost.md).
 
 ## 11. Definition of done
 
-- One command (`docker compose up`) starts all local services, and OpenTofu provisions AWS
-- Data flows from Binance to the dashboard with no manual steps
-- Quality checks and dbt tests pass in the scheduled run
-- README includes an architecture diagram, setup steps, design decisions, cost summary, and "what I'd change at scale"
+- [x] `make up` starts the local stack; OpenTofu provisions AWS.
+- [x] Data flows from Binance to Superset without manual chart setup.
+- [x] Quality checks and dbt tests pass in a scheduled run; failures block it.
+- [x] Replays and rebalances do not create duplicates.
+- [x] Archive backfill gives the dashboard at least 30 days of history.
+- [x] README, architecture, data model, testing, ADRs, runbook, cost, and glossary exist.
+- [x] Lint, types, and 118 offline tests pass; CI runs them on `main` pushes and
+  pull requests.
+
+## 12. Limits
+
+- One Kafka broker is a single point of failure; a host sleep stops the pipeline.
+- There is no trade archive. After a host pause, Kafka replays trades and quotes it
+  already accepted, but events from the paused period are lost. Candles can be
+  rebuilt from Binance's T+1 kline archive; quote history has no archive at all.
+- Gold freshness follows the scheduler (~30–35 minutes), so this is near-real-time,
+  not a streaming dashboard.
+- Kafka replay is limited to the seven-day topic retention.
+- CI does not run dbt, GX, or the live Kafka roundtrip; those need AWS or a broker.
+- S3 expiration and tiering rules for Athena results and old bronze data are still
+  pending; only abort-incomplete-upload is configured.
