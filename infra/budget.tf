@@ -1,5 +1,6 @@
-# Created FIRST on purpose: the cost guardrail exists before any other
-# resource can spend money (Brief section 10).
+# Declared first in the main stack on purpose: it is the spend guardrail.
+# OpenTofu may create independent resources concurrently; the bootstrap state
+# backend is created before this stack (Brief section 10).
 
 resource "aws_budgets_budget" "monthly" {
   name              = "${var.project}-monthly"

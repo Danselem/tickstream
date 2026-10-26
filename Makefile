@@ -43,8 +43,9 @@ typecheck: ## Mypy on src and tests
 test: ## Pytest unit suite (integration tests auto-skip without env)
 	$(UV) pytest -m "not integration"
 
+# Host commands that touch AWS load .env; Docker services get it via env_file.
 quality: ## Run Great Expectations checks once (Phase 2+)
-	$(UV) python -m pipeline.scheduler --once --quality-only
+	bash -c 'set -a; [ -f .env ] && source .env; set +a; $(UV) python -m pipeline.scheduler --once --quality-only'
 
 # dbt reads connection details from env (profiles.yml uses env_var), so .env is
 # sourced first. `dbt deps` installs dbt_utils on first run (dbt_packages/ is gitignored).
@@ -59,27 +60,27 @@ END ?=
 SYMBOLS ?=
 FORCE ?=
 backfill: ## Backfill 1m klines (START=YYYY-MM-DD END=YYYY-MM-DD SYMBOLS= FORCE=1)
-	$(UV) python -m pipeline.backfill $(if $(START),--start $(START),) $(if $(END),--end $(END),) $(if $(SYMBOLS),--symbols $(SYMBOLS),) $(if $(FORCE),--force,)
+	bash -c 'set -a; [ -f .env ] && source .env; set +a; $(UV) python -m pipeline.backfill $(if $(START),--start $(START),) $(if $(END),--end $(END),) $(if $(SYMBOLS),--symbols $(SYMBOLS),) $(if $(FORCE),--force,)'
 
 # --quality-only skips dbt (this target only compacts); --maintenance runs after
 # a passing quality check. The scheduler loop itself calls run_once() with dbt.
 maintenance: ## Run Athena OPTIMIZE + VACUUM on bronze/silver/gold (Phase 2+)
-	$(UV) python -m pipeline.scheduler --once --quality-only --maintenance
+	bash -c 'set -a; [ -f .env ] && source .env; set +a; $(UV) python -m pipeline.scheduler --once --quality-only --maintenance'
 
 TABLES ?= bronze_trades
 compact: ## Compact+clean Iceberg tables via Athena OPTIMIZE/VACUUM (bypasses quality gate)
-	$(UV) python -m pipeline.scheduler --once --maintenance-only --tables $(TABLES)
+	bash -c 'set -a; [ -f .env ] && source .env; set +a; $(UV) python -m pipeline.scheduler --once --maintenance-only --tables $(TABLES)'
 
 DAYS ?=
 KEY ?=
 dedup-bronze: ## Dedup (stop consumers first; DAYS=3 scopes, KEY=SYM:ID targets one key)
-	$(UV) python -m pipeline.scheduler --dedup-bronze $(if $(DAYS),--dedup-days $(DAYS),) $(if $(KEY),--dedup-key $(KEY),)
+	bash -c 'set -a; [ -f .env ] && source .env; set +a; $(UV) python -m pipeline.scheduler --dedup-bronze $(if $(DAYS),--dedup-days $(DAYS),) $(if $(KEY),--dedup-key $(KEY),)'
 
 integrity: ## Whole-table bronze duplicate check (ADR-016)
-	$(UV) python -m pipeline.scheduler --integrity-only
+	bash -c 'set -a; [ -f .env ] && source .env; set +a; $(UV) python -m pipeline.scheduler --integrity-only'
 
 health: ## Collect per-layer row counts + per-symbol freshness (ADR-021)
-	$(UV) python -m pipeline.scheduler --health-only
+	bash -c 'set -a; [ -f .env ] && source .env; set +a; $(UV) python -m pipeline.scheduler --health-only'
 
 superset: ## Re-run dashboard provisioning against the running Superset (Phase 3+)
 	docker compose exec superset python /app/provision/provision.py
@@ -93,7 +94,7 @@ infra-bootstrap: ## One-time: create S3+DynamoDB tofu state backend, write infra
 
 infra-plan: ## Show tofu plan (needs infra/backend.hcl; run infra-bootstrap first)
 	@if [ ! -f $(BACKEND_CONFIG) ]; then echo "ERROR: $(BACKEND_CONFIG) missing — run 'make infra-bootstrap' first."; exit 1; fi
-	@if [ "$(ALERT_EMAIL)" = "budget-alerts@example.com" ]; then echo "WARNING: placeholder ALERT_EMAIL in use — override at apply time (ALERT_EMAIL=you@example.com)."; fi
+	@if [ "$(ALERT_EMAIL)" = "budget-alerts@example.com" ]; then echo "WARNING: placeholder ALERT_EMAIL in use — re-run make infra-plan with ALERT_EMAIL=you@example.com; apply uses the saved plan."; fi
 	cd $(INFRA_DIR) && $(TOFU) init -backend-config=backend.hcl && $(TOFU) plan -out=plan.tfplan -var="alert_email=$(ALERT_EMAIL)"
 
 infra-apply: ## Apply the saved plan — REQUIRES EXPLICIT HUMAN APPROVAL
